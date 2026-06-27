@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>OmegaPacman — game-v1</title>
+<title>OmegaPacman — ghost-brains</title>
 <style>
   :root {
     --cell: 44px;
@@ -98,8 +98,18 @@
     align-items: center;
   }
   #hud b { color: #ffe000; }
+  #stats {
+    display: flex;
+    gap: 22px;
+    font-size: 14px;
+    padding: 8px 14px;
+    border: 1px solid #2a2a6a;
+    border-radius: 8px;
+    background: #11112e;
+  }
+  #stats b { color: #36e0e0; }
   #status { font-size: 15px; min-height: 20px; font-weight: bold; }
-  .controls { display: flex; gap: 10px; }
+  .controls { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
   button {
     font: inherit;
     padding: 8px 16px;
@@ -111,11 +121,24 @@
   }
   button:hover { background: #4a4aa8; }
   button:disabled { opacity: 0.4; cursor: default; }
+  details { width: 540px; max-width: 90vw; font-size: 12px; opacity: 0.85; }
+  summary { cursor: pointer; }
+  #ctx {
+    white-space: pre;
+    overflow: auto;
+    max-height: 280px;
+    background: #05051a;
+    border: 1px solid #2a2a6a;
+    border-radius: 6px;
+    padding: 10px;
+    font-size: 11px;
+    line-height: 1.35;
+  }
 </style>
 </head>
 <body>
   <h1>OmegaPacman</h1>
-  <p class="sub">game-v1 — ghosts move randomly (SKILL.md brains come later)</p>
+  <p class="sub">ghost-brains — ghosts decide via SKILL.md (local stub, no API yet)</p>
 
   <div id="board" aria-label="game grid"></div>
 
@@ -124,26 +147,45 @@
     <span>Pellets: <b id="pellets">0</b> / <b id="totpellets">0</b></span>
     <span>Score: <b id="score">—</b></span>
   </div>
+
+  <div id="stats">
+    <span>Games: <b id="st-games">0</b></span>
+    <span>Catch rate: <b id="st-rate">—</b></span>
+    <span>Avg turns-to-catch: <b id="st-avg">—</b></span>
+  </div>
+
   <div id="status">Press Play to start the chase.</div>
 
   <div class="controls">
     <button id="play">Play</button>
     <button id="step">Step</button>
     <button id="new">New Game</button>
+    <button id="batch">Run 200 games</button>
+    <button id="resetstats">Reset Stats</button>
   </div>
+
+  <details>
+    <summary>Decision context (Ghost A, latest turn) — what each ghost brain reads</summary>
+    <pre id="ctx">Run a turn to populate the decision context.</pre>
+  </details>
 
 <script>
 /* ===================================================================
-   OmegaPacman — game-v1
-   Turn-based grid chase. Pac-Man flees; 4 ghosts move randomly.
-   Game state is exposed at window.OMEGA for a future agent to read.
+   OmegaPacman — ghost-brains
+   Turn-based grid chase. Pac-Man flees + forages; the 4 ghosts now decide
+   their moves from SKILL.md files instead of moving randomly.
+
+   Each turn, for each ghost we build a DECISION CONTEXT:
+     [game state as text: maze, pellets, pac-man, ghosts, legal moves]
+     + [that ghost's own .md]  + [the shared team.md]
+   and hand it to a LOCAL stub (decideGhostMove) that reads a simple
+   `strategy:` directive from the .md text. No network/LLM call yet — this
+   verifies the whole wiring end-to-end. We track BOTH catch rate and
+   average turns-to-catch across games as a baseline for learning later.
    =================================================================== */
 
-// 10x10 fixed maze. 1 = wall, 0 = floor. Designed so cooperation matters:
-// mostly 1-cell-wide corridors, 14 single-cell choke points (articulation
-// cells — blocking one splits the floor), 4 junctions, and 4 dead-end pockets
-// at (1,8) (5,6) (8,1) (8,8) where Pac-Man can be cornered. BFS-verified that
-// all 40 floor cells stay connected.
+// 10x10 fixed maze. 1 = wall, 0 = floor. Corridor maze with 14 single-cell
+// choke points, 4 junctions, 4 dead-end pockets; all 40 floor cells connected.
 const MAZE = [
   [1,1,1,1,1,1,1,1,1,1],
   [1,0,0,0,1,0,0,0,0,1],
@@ -159,13 +201,18 @@ const MAZE = [
 const SIZE = 10;
 const MAX_TURNS = 60;          // ghosts lose if Pac-Man survives this long
 const GHOST_COLORS = ["#ff4d4d", "#ff9ed8", "#36e0e0", "#ffae42"];
+const GHOST_IDS = ["a", "b", "c", "d"];
+
+// Single-cell choke points (articulation cells) — used by the "guard" strategy.
+const CHOKES = [
+  [1,5],[1,6],[1,7],[2,5],[3,5],[5,5],
+  [7,1],[7,2],[7,3],[7,5],[7,8],[8,3],[8,4],[8,5],
+];
 
 // Pellet-seeking weights: Pac-Man maximises A*min(ghostDist, CAP) - B*pelletDist.
-// Capping the ghost term means that once Pac-Man is safe (>= CAP away) the
-// pellet term decides, so it heads for food; when a ghost is close, survival wins.
 const FLEE = { A: 2, B: 1, CAP: 4 };
 
-// Starting positions (row, col). Pac-Man central-ish, ghosts in the corners.
+// Starting positions (row, col). Pac-Man central, ghosts in the corners.
 const START = {
   pacman: { r: 5, c: 4 },
   ghosts: [
@@ -176,11 +223,38 @@ const START = {
   ],
 };
 
-// ---- Mutable game state -------------------------------------------------
+// Pre-rendered maze art (static) reused inside every decision context.
+const MAZE_TEXT = MAZE.map(row => row.map(v => (v ? "#" : ".")).join("")).join("\n");
+
+// ===================================================================
+// SKILL.md files. Inline defaults keep the page runnable as a single file
+// (file://). When served over http(s) we fetch the real .md files so edits
+// to them take effect. The stub reads SKILLS[...] live at decision time.
+// ===================================================================
+const DEFAULT_SKILLS = {
+  ghost_a: "# Ghost A — strategy\n\nmove randomly for now\n\nstrategy: random\n",
+  ghost_b: "# Ghost B — strategy\n\nmove randomly for now\n\nstrategy: random\n",
+  ghost_c: "# Ghost C — strategy\n\nmove randomly for now\n\nstrategy: random\n",
+  ghost_d: "# Ghost D — strategy\n\nmove randomly for now\n\nstrategy: random\n",
+  team:    "# Team — shared strategy\n\nmove randomly for now\n",
+};
+let SKILLS = { ...DEFAULT_SKILLS };
+
+async function loadSkills() {
+  const names = ["ghost_a", "ghost_b", "ghost_c", "ghost_d", "team"];
+  await Promise.all(names.map(async n => {
+    try {
+      const res = await fetch(n + ".md", { cache: "no-store" });
+      if (res.ok) SKILLS[n] = await res.text();
+    } catch (_) { /* file:// or offline — keep inline default */ }
+  }));
+}
+
+// ---- State factory ------------------------------------------------------
 let state;
 
-function newGame() {
-  state = {
+function makeState() {
+  return {
     grid: MAZE,                                  // reference; never mutated
     pacman: { ...START.pacman },
     ghosts: START.ghosts.map(g => ({ ...g })),
@@ -189,10 +263,16 @@ function newGame() {
     turn: 0,
     maxTurns: MAX_TURNS,
     score: null,                                 // turns-to-catch once caught
-    status: "ready",                             // ready | playing | caught | escaped | cleared
+    status: "ready",                             // ready|playing|caught|escaped|cleared
   };
+}
+
+function newGame() {
+  state = makeState();
   stopAuto();
   render();
+  document.getElementById("ctx").textContent =
+    "Run a turn to populate the decision context.";
   setStatus("Press Play to start the chase.");
 }
 
@@ -209,147 +289,293 @@ function makePellets() {
   return pellets;
 }
 
-// ---- Helpers ------------------------------------------------------------
+// ---- Geometry helpers ---------------------------------------------------
 const isFloor = (r, c) =>
   r >= 0 && r < SIZE && c >= 0 && c < SIZE && MAZE[r][c] === 0;
 
 const same = (a, b) => a.r === b.r && a.c === b.c;
+const key = (r, c) => `${r},${c}`;
+const manhattan = (a, b) => Math.abs(a.r - b.r) + Math.abs(a.c - b.c);
 
-// Orthogonal neighbours that are floor, plus the option to stay put.
 function moveOptions(pos, includeStay) {
   const opts = includeStay ? [{ ...pos }] : [];
-  const deltas = [[-1,0],[1,0],[0,-1],[0,1]];
-  for (const [dr, dc] of deltas) {
+  for (const [dr, dc] of [[-1,0],[1,0],[0,-1],[0,1]]) {
     const r = pos.r + dr, c = pos.c + dc;
     if (isFloor(r, c)) opts.push({ r, c });
   }
   return opts;
 }
 
-const manhattan = (a, b) => Math.abs(a.r - b.r) + Math.abs(a.c - b.c);
-
-function distToNearestGhost(cell) {
-  return Math.min(...state.ghosts.map(g => manhattan(cell, g)));
-}
-
-function distToNearestPellet(cell) {
-  if (state.pellets.size === 0) return 0;
-  let best = Infinity;
-  for (const key of state.pellets) {
-    const [r, c] = key.split(",").map(Number);
-    const d = manhattan(cell, { r, c });
-    if (d < best) best = d;
-  }
-  return best;
+function dirOf(from, to) {
+  const dr = to.r - from.r, dc = to.c - from.c;
+  if (dr === -1) return "up";
+  if (dr === 1) return "down";
+  if (dc === -1) return "left";
+  if (dc === 1) return "right";
+  return "stay";
 }
 
 function pickRandom(arr) {
   return arr[Math.floor(Math.random() * arr.length)];
 }
 
-// ---- Agent behaviour ----------------------------------------------------
-// Pac-Man: flee + forage. Score each reachable cell (staying put allowed) by
-//   A * min(distToNearestGhost, CAP)  -  B * distToNearestPellet
-// so survival dominates when a ghost is near, and pellet-seeking takes over
-// once Pac-Man is safe. Ties broken randomly.
-function pacmanMove() {
-  const options = moveOptions(state.pacman, true);
-  let best = -Infinity;
-  const bestCells = [];
-  for (const cell of options) {
-    const score =
-      FLEE.A * Math.min(distToNearestGhost(cell), FLEE.CAP) -
-      FLEE.B * distToNearestPellet(cell);
-    if (score > best) { best = score; bestCells.length = 0; bestCells.push(cell); }
-    else if (score === best) bestCells.push(cell);
+// Pick the cell with the smallest score; ties broken randomly.
+function argminCell(cells, scoreFn) {
+  let best = Infinity, bucket = [];
+  for (const cell of cells) {
+    const s = scoreFn(cell);
+    if (s < best) { best = s; bucket = [cell]; }
+    else if (s === best) bucket.push(cell);
   }
-  return pickRandom(bestCells);
+  return pickRandom(bucket);
 }
 
-// Ghost: random legal move (must move if any move exists).
-function ghostMove(ghost) {
-  const options = moveOptions(ghost, false);
-  return options.length ? pickRandom(options) : { ...ghost };
+// Wall-aware BFS distance map from one or more source cells.
+function bfsDist(sources) {
+  const dist = new Map();
+  const q = [];
+  for (const s of sources) { dist.set(key(s.r, s.c), 0); q.push(s); }
+  while (q.length) {
+    const cur = q.shift();
+    const d = dist.get(key(cur.r, cur.c));
+    for (const nb of moveOptions(cur, false)) {
+      const k = key(nb.r, nb.c);
+      if (!dist.has(k)) { dist.set(k, d + 1); q.push(nb); }
+    }
+  }
+  return dist;
+}
+const distOf = (dist, cell) => dist.get(key(cell.r, cell.c)) ?? Infinity;
+
+// Static distance-to-nearest-choke map (computed once at boot).
+const CHOKE_DIST = bfsDist(CHOKES.map(([r, c]) => ({ r, c })));
+
+// ---- Pac-Man: flee + forage --------------------------------------------
+function distToNearestGhost(st, cell) {
+  return Math.min(...st.ghosts.map(g => manhattan(cell, g)));
+}
+function distToNearestPellet(st, cell) {
+  if (st.pellets.size === 0) return 0;
+  let best = Infinity;
+  for (const k of st.pellets) {
+    const [r, c] = k.split(",").map(Number);
+    const d = manhattan(cell, { r, c });
+    if (d < best) best = d;
+  }
+  return best;
+}
+function pacmanScore(st, cell) {
+  return FLEE.A * Math.min(distToNearestGhost(st, cell), FLEE.CAP)
+       - FLEE.B * distToNearestPellet(st, cell);
+}
+function pacmanMove(st) {
+  const options = moveOptions(st.pacman, true);
+  let best = -Infinity, bucket = [];
+  for (const cell of options) {
+    const s = pacmanScore(st, cell);
+    if (s > best) { best = s; bucket = [cell]; }
+    else if (s === best) bucket.push(cell);
+  }
+  return pickRandom(bucket);
+}
+// Deterministic guess of Pac-Man's next cell (used by the intercept strategy).
+function predictPacman(st) {
+  const options = moveOptions(st.pacman, true);
+  let best = -Infinity, choice = options[0];
+  for (const cell of options) {
+    const s = pacmanScore(st, cell);
+    if (s > best) { best = s; choice = cell; }
+  }
+  return choice;
 }
 
-// ---- Turn engine --------------------------------------------------------
+// ===================================================================
+// Ghost brains — SKILL.md driven.
+// ===================================================================
+
+// Read the active strategy for ghost i: its own .md wins, else team.md,
+// else default random. Recognised: random | chase | intercept | guard.
+function ghostStrategy(i) {
+  const own = SKILLS["ghost_" + GHOST_IDS[i]] || "";
+  const team = SKILLS["team"] || "";
+  const re = /strategy:\s*(random|chase|intercept|guard)/i;
+  let m = own.match(re);
+  if (m) return m[1].toLowerCase();
+  m = team.match(re);
+  if (m) return m[1].toLowerCase();
+  const blob = (own + "\n" + team).toLowerCase();
+  for (const s of ["chase", "intercept", "guard"])
+    if (new RegExp("\\b" + s + "\\b").test(blob)) return s;
+  return "random";
+}
+
+// Build the textual decision context handed to a ghost brain.
+function buildContext(st, i) {
+  const g = st.ghosts[i];
+  const legal = moveOptions(g, false)
+    .map(m => `${dirOf(g, m)} (${m.r},${m.c})`).join(", ") || "none";
+  const pellets = [...st.pellets].join(" ");
+  const ghosts = st.ghosts
+    .map((gg, j) => `${GHOST_IDS[j].toUpperCase()}(${gg.r},${gg.c})`).join(" ");
+  const id = GHOST_IDS[i];
+  return [
+    `TURN ${st.turn} — Ghost ${id.toUpperCase()} at (${g.r},${g.c})`,
+    `MAZE (#=wall .=floor):`,
+    MAZE_TEXT,
+    `PAC-MAN: (${st.pacman.r},${st.pacman.c})`,
+    `GHOSTS: ${ghosts}`,
+    `PELLETS (${st.pellets.size} left): ${pellets}`,
+    `LEGAL MOVES: ${legal}`,
+    `--- ghost_${id}.md ---`,
+    (SKILLS["ghost_" + id] || "").trim(),
+    `--- team.md ---`,
+    (SKILLS["team"] || "").trim(),
+  ].join("\n");
+}
+
+// Decide one ghost's move from its decision context + SKILL.md directive.
+function decideGhostMove(st, i) {
+  const g = st.ghosts[i];
+  const legal = moveOptions(g, false);
+  if (!legal.length) return { ...g };
+
+  // The full context is assembled every turn (this is what an LLM brain will
+  // receive later). The local stub only consults the parsed strategy for now.
+  const context = buildContext(st, i);
+  if (i === 0) LAST_CONTEXT = context;
+
+  switch (ghostStrategy(i)) {
+    case "chase": {
+      const dist = bfsDist([st.pacman]);
+      return argminCell(legal, c => distOf(dist, c));
+    }
+    case "intercept": {
+      const dist = bfsDist([predictPacman(st)]);
+      return argminCell(legal, c => distOf(dist, c));
+    }
+    case "guard": {
+      // Head to the nearest choke point; break ties by closing on Pac-Man.
+      const toPac = bfsDist([st.pacman]);
+      return argminCell(legal, c =>
+        distOf(CHOKE_DIST, c) * 100 + distOf(toPac, c));
+    }
+    case "random":
+    default:
+      return pickRandom(legal);
+  }
+}
+
+let LAST_CONTEXT = "";
+
+// ===================================================================
+// Turn engine. advance() is pure (no DOM) so it powers both the live game
+// and headless batch runs through the exact same logic.
+// ===================================================================
+function advance(st) {
+  st.status = "playing";
+  st.turn += 1;
+
+  // 1) Pac-Man moves, eating any pellet it lands on.
+  st.pacman = pacmanMove(st);
+  const k = key(st.pacman.r, st.pacman.c);
+  if (st.pellets.has(k)) { st.pellets.delete(k); st.pelletsEaten += 1; }
+  if (st.ghosts.some(g => same(g, st.pacman))) {
+    st.status = "caught"; st.score = st.turn; return "caught";
+  }
+  if (st.pellets.size === 0) { st.status = "cleared"; return "cleared"; }
+
+  // 2) Each ghost decides + moves; catch checked after every ghost.
+  for (let i = 0; i < st.ghosts.length; i++) {
+    st.ghosts[i] = decideGhostMove(st, i);
+    if (same(st.ghosts[i], st.pacman)) {
+      st.status = "caught"; st.score = st.turn; return "caught";
+    }
+  }
+
+  // 3) Out of turns? Pac-Man escapes; ghosts lose.
+  if (st.turn >= st.maxTurns) { st.status = "escaped"; return "escaped"; }
+  return null;
+}
+
+const ENDINGS = {
+  caught:  st => `Caught in ${st.score} turns! Ghosts win (lower is better).`,
+  escaped: st => `Pac-Man escaped after ${st.maxTurns} turns — ghosts lose.`,
+  cleared: st => `Board cleared in ${st.turn} turns — Pac-Man wins, ghosts lose.`,
+};
+
 function step() {
   if (state.status !== "ready" && state.status !== "playing") return;
-  state.status = "playing";
-  state.turn += 1;
-
-  // 1) Pac-Man moves one cell, eating any pellet on the landing cell.
-  state.pacman = pacmanMove();
-  const key = `${state.pacman.r},${state.pacman.c}`;
-  if (state.pellets.has(key)) {
-    state.pellets.delete(key);
-    state.pelletsEaten += 1;
-  }
-  if (state.ghosts.some(g => same(g, state.pacman))) return endCaught();
-
-  // All pellets eaten? Pac-Man clears the board and the ghosts lose.
-  if (state.pellets.size === 0) {
-    state.status = "cleared";
-    stopAuto();
-    render();
-    setStatus(`Board cleared in ${state.turn} turns — Pac-Man wins, ghosts lose.`);
-    return;
-  }
-
-  // 2) Each ghost moves one cell; catch is checked after every ghost.
-  for (let i = 0; i < state.ghosts.length; i++) {
-    state.ghosts[i] = ghostMove(state.ghosts[i]);
-    if (same(state.ghosts[i], state.pacman)) return endCaught();
-  }
-
-  // 3) Out of turns? Pac-Man escapes and the ghosts lose.
-  if (state.turn >= state.maxTurns) {
-    state.status = "escaped";
-    stopAuto();
-    render();
-    setStatus(`Pac-Man escaped after ${state.maxTurns} turns — ghosts lose.`);
-    return;
-  }
-
-  render();
-}
-
-function endCaught() {
-  state.status = "caught";
-  state.score = state.turn;
+  const term = advance(state);
+  if (!term) { render(); updateContextView(); return; }
   stopAuto();
+  recordGame(term, state.score);
   render();
-  setStatus(`Caught in ${state.turn} turns! Ghosts win (lower is better).`);
+  updateContextView();
+  renderStats();
+  setStatus(ENDINGS[term](state));
 }
 
-// ---- Rendering ----------------------------------------------------------
+// ===================================================================
+// Metrics — tracked across every game (live + batch).
+// ===================================================================
+let STATS = { games: 0, catches: 0, turnsSum: 0 };
+
+function recordGame(term, score) {
+  STATS.games += 1;
+  if (term === "caught") { STATS.catches += 1; STATS.turnsSum += score; }
+}
+function renderStats() {
+  const { games, catches, turnsSum } = STATS;
+  document.getElementById("st-games").textContent = games;
+  document.getElementById("st-rate").textContent =
+    games ? (catches / games * 100).toFixed(1) + "%" : "—";
+  document.getElementById("st-avg").textContent =
+    catches ? (turnsSum / catches).toFixed(1) : "—";
+}
+function resetStats() {
+  STATS = { games: 0, catches: 0, turnsSum: 0 };
+  renderStats();
+  setStatus("Stats reset.");
+}
+
+// Run N full games headlessly and fold the results into the metrics.
+function runBatch(n) {
+  for (let i = 0; i < n; i++) {
+    const st = makeState();
+    let term = null;
+    while ((term = advance(st)) === null) { /* play to terminal */ }
+    recordGame(term, st.score);
+  }
+  renderStats();
+  setStatus(`Ran ${n} games (headless). Metrics updated below.`);
+}
+
+// ===================================================================
+// Rendering.
+// ===================================================================
 const board = document.getElementById("board");
 
 function buildBoard() {
   board.innerHTML = "";
-  for (let r = 0; r < SIZE; r++) {
+  for (let r = 0; r < SIZE; r++)
     for (let c = 0; c < SIZE; c++) {
       const div = document.createElement("div");
       div.className = "cell" + (MAZE[r][c] === 1 ? " wall" : "");
       div.id = `cell-${r}-${c}`;
       board.appendChild(div);
     }
-  }
 }
 
 function render() {
-  // Clear any entities from floor cells.
   document.querySelectorAll(".cell").forEach(c => { c.innerHTML = ""; });
 
-  // Pellets first, so entities draw on top.
-  for (const key of state.pellets) {
-    const cell = document.getElementById(`cell-${key.replace(",", "-")}`);
+  for (const k of state.pellets) {
+    const cell = document.getElementById(`cell-${k.replace(",", "-")}`);
     if (!cell) continue;
     const dot = document.createElement("div");
     dot.className = "pellet";
     cell.appendChild(dot);
   }
-
   state.ghosts.forEach((g, i) => {
     const cell = document.getElementById(`cell-${g.r}-${g.c}`);
     if (!cell) return;
@@ -358,7 +584,6 @@ function render() {
     el.style.background = GHOST_COLORS[i];
     cell.appendChild(el);
   });
-
   const p = document.getElementById(`cell-${state.pacman.r}-${state.pacman.c}`);
   if (p) {
     const el = document.createElement("div");
@@ -373,6 +598,10 @@ function render() {
     state.pelletsEaten + state.pellets.size;
   document.getElementById("score").textContent =
     state.score == null ? "—" : state.score;
+}
+
+function updateContextView() {
+  if (LAST_CONTEXT) document.getElementById("ctx").textContent = LAST_CONTEXT;
 }
 
 function setStatus(msg) {
@@ -399,14 +628,12 @@ function toggleAuto() {
 
 // ---- Wiring -------------------------------------------------------------
 playBtn.addEventListener("click", toggleAuto);
-document.getElementById("step").addEventListener("click", () => {
-  stopAuto();
-  step();
-});
+document.getElementById("step").addEventListener("click", () => { stopAuto(); step(); });
 document.getElementById("new").addEventListener("click", newGame);
+document.getElementById("batch").addEventListener("click", () => runBatch(200));
+document.getElementById("resetstats").addEventListener("click", resetStats);
 
-// ---- Public API for a future SKILL.md-driven agent ----------------------
-// Read-only snapshot of the world; deep-copied so callers can't mutate state.
+// ---- Public API ---------------------------------------------------------
 window.OMEGA = {
   getState() {
     return {
@@ -424,14 +651,22 @@ window.OMEGA = {
       status: state.status,
     };
   },
-  step,            // advance one full turn
-  newGame,         // reset
-  config: { SIZE, MAX_TURNS, START },
+  step,
+  newGame,
+  runBatch,
+  resetStats,
+  buildContext: i => buildContext(state, i),  // inspect a ghost's context
+  get stats() { return { ...STATS }; },
+  get skills() { return { ...SKILLS }; },
+  reloadSkills: () => loadSkills(),
+  config: { SIZE, MAX_TURNS, START, CHOKES },
 };
 
 // ---- Boot ---------------------------------------------------------------
 buildBoard();
 newGame();
+renderStats();
+loadSkills();  // upgrade from inline defaults to on-disk .md when served
 </script>
 </body>
 </html>
