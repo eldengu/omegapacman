@@ -4,6 +4,17 @@ OmegaPacman flips Pac-Man: instead of controlling Pac-Man to escape, 4 ghost age
 
 a turn-based grid chase game where ghost agents learn team strategy via Reflexion on per-ghost and shared SKILL.md files — Alpha series? this is Omega
 
+## Baseline (before learning)
+
+Starting metrics on the corridor maze, so we can compare against learned results later. Measured over a headless batch of games (`Run 200 games` in the UI / `OMEGA.runBatch`).
+
+| Ghost strategy | Catch rate | Avg turns-to-catch |
+| --- | --- | --- |
+| **Random** (empty SKILL.md — the "before") | **40.6%** | **32.6** |
+| Hand-written `chase`/`intercept` in the .md (reference ceiling) | ~100% | ~7 |
+
+These are the **"before" numbers**. The hand-written chase/intercept row is only a reference ceiling — it shows what good teamwork can achieve, not a strategy we ship. The goal of OmegaPacman is for the ghosts to discover effective teamwork *themselves* via Reflexion (verbal reinforcement written back into per-ghost and shared SKILL.md), closing the gap from 40.6% toward the ~100% ceiling — without anyone coding the strategy.
+
 ## Related Work
 
 - **Multi-Agent Evolve** (2025/10) — spins up Proposer/Solver/Judge roles from a single base LLM to extend self-play self-improvement to general domains. https://arxiv.org/html/2510.23595v1
