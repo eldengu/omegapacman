@@ -7,8 +7,9 @@
 <style>
   :root {
     --cell: 44px;
-    --wall: #14143a;
-    --floor: #1d1d4d;
+    --wall: #1f3bff;
+    --wall-edge: #7d96ff;
+    --floor: #05051a;
     --bg: #0a0a23;
     --ink: #e8e8ff;
   }
@@ -48,7 +49,12 @@
     justify-content: center;
     position: relative;
   }
-  .cell.wall { background: var(--wall); border-radius: 6px; }
+  .cell.wall {
+    background: var(--wall);
+    border: 2px solid var(--wall-edge);
+    border-radius: 4px;
+    box-shadow: inset 0 0 6px rgba(0,0,0,0.55);
+  }
 
   /* Pellet: small dot on a floor cell */
   .pellet {
@@ -133,18 +139,21 @@
    Game state is exposed at window.OMEGA for a future agent to read.
    =================================================================== */
 
-// 10x10 fixed maze. 1 = wall, 0 = floor. Interior walls form corridors and
-// junctions; all floor cells are verified connected.
+// 10x10 fixed maze. 1 = wall, 0 = floor. Designed so cooperation matters:
+// mostly 1-cell-wide corridors, 14 single-cell choke points (articulation
+// cells — blocking one splits the floor), 4 junctions, and 4 dead-end pockets
+// at (1,8) (5,6) (8,1) (8,8) where Pac-Man can be cornered. BFS-verified that
+// all 40 floor cells stay connected.
 const MAZE = [
   [1,1,1,1,1,1,1,1,1,1],
-  [1,0,0,0,0,0,0,0,0,1],
-  [1,0,1,1,0,0,1,1,0,1],
-  [1,0,1,0,0,0,0,1,0,1],
-  [1,0,0,0,1,1,0,0,0,1],
-  [1,0,1,0,1,1,0,1,0,1],
-  [1,0,1,0,0,0,0,1,0,1],
-  [1,0,0,1,0,0,1,0,0,1],
-  [1,0,0,0,0,0,0,0,0,1],
+  [1,0,0,0,1,0,0,0,0,1],
+  [1,0,1,0,1,0,1,1,1,1],
+  [1,0,1,0,0,0,0,0,0,1],
+  [1,0,1,1,1,1,1,1,0,1],
+  [1,0,0,0,0,0,0,1,0,1],
+  [1,1,1,1,1,0,1,1,0,1],
+  [1,0,0,0,1,0,0,0,0,1],
+  [1,0,1,0,0,0,1,1,0,1],
   [1,1,1,1,1,1,1,1,1,1],
 ];
 const SIZE = 10;
@@ -158,7 +167,7 @@ const FLEE = { A: 2, B: 1, CAP: 4 };
 
 // Starting positions (row, col). Pac-Man central-ish, ghosts in the corners.
 const START = {
-  pacman: { r: 4, c: 3 },
+  pacman: { r: 5, c: 4 },
   ghosts: [
     { r: 1, c: 1 },
     { r: 1, c: 8 },
