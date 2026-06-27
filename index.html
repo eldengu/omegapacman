@@ -248,6 +248,21 @@
     max-width: 100%;
   }
   .boardctrls { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+  #moveinfo {
+    width: var(--board-size);
+    min-height: 40px;
+    background: var(--panel);
+    border: 1px solid var(--edge);
+    border-radius: 8px;
+    padding: 8px 12px;
+    font-size: 12px;
+    line-height: 1.4;
+    color: var(--ink);
+    text-align: center;
+  }
+  #moveinfo .mi-actor { font-weight: bold; }
+  #moveinfo .mi-reason { color: var(--muted); }
+  #moveinfo.thinking { color: var(--muted); font-style: italic; }
 
   /* memory panel: TOP (per-actor, auto-switching) + BOTTOM (team, fixed) */
   #memorypane {
@@ -427,6 +442,7 @@
           <button id="fwdBtn" title="Step forward one turn">&raquo;</button>
           <button id="textToggle" title="Switch board / text view">Text view</button>
         </div>
+        <div id="moveinfo" title="Grok's chosen move + reason">Grok decides the ghosts. Add your xAI key in ⚙️ Settings, then press ▶ / ».</div>
       </div>
 
       <div id="memorypane">
@@ -549,60 +565,23 @@ const MAZE = [
   [1,1,1,1,1,1,1,1,1,1],
 ];
 const SIZE = 10;
+const MAZE_TEXT = MAZE.map(row => row.map(v => (v ? "#" : ".")).join("")).join("\n");
 
-// Placeholder SKILL.md text for the Memory panel (mock — many lines so the
-// large boxes look realistic).
-const MOCK_MEMORY = {
-  atlanta:
-    "# Atlanta — personal strategy\n" +
-    "# role: lead chaser\n" +
-    "# reason: I am closest at the start, so I pressure Pac-Man early\n" +
-    "#         and deny the top-left corridors.\n" +
-    "\n" +
-    "chase\n" +
-    "herd south\n" +
-    "\n" +
-    "# notes from last round:\n" +
-    "# - Pac-Man slipped past me near (1,4); cut that lane sooner.\n",
-  berkeley:
-    "# Berkeley — personal strategy\n" +
-    "# role: flanker\n" +
-    "# reason: approach from the opposite side of Atlanta to pincer.\n" +
-    "\n" +
-    "intercept\n" +
-    "support Atlanta\n" +
-    "\n" +
-    "# notes from last round:\n" +
-    "# - good cut-off at the east junction; keep it up.\n",
-  chicago:
-    "# Chicago — personal strategy\n" +
-    "# role: choke guard (north)\n" +
-    "# reason: Pac-Man keeps escaping into the north pocket.\n" +
-    "\n" +
-    "guard 1,5\n" +
-    "\n" +
-    "# notes from last round:\n" +
-    "# - held the choke once, then wandered. Stay put longer.\n",
-  delaware:
-    "# Delaware — personal strategy\n" +
-    "# role: choke guard (south)\n" +
-    "# reason: seal the escape behind Pac-Man as the team closes in.\n" +
-    "\n" +
-    "guard 8,5\n" +
-    "\n" +
-    "# notes from last round:\n" +
-    "# - arrived late; start moving toward the choke on turn 1.\n",
-  team:
-    "# Team — shared strategy\n" +
-    "# reason: surround, don't just chase. Two press, two seal the chokes,\n" +
-    "#         and herd Pac-Man into a dead-end pocket.\n" +
-    "\n" +
-    "herd north\n" +
-    "\n" +
-    "# coordination:\n" +
-    "# - Atlanta + Berkeley press from opposite sides.\n" +
-    "# - Chicago guards the north choke, Delaware the south.\n" +
-    "# - collapse together once Pac-Man is boxed in.\n",
+// ---- Grok (xAI) config --------------------------------------------------
+const GROK_URL = "https://api.x.ai/v1/chat/completions";
+const GROK_MODEL = "grok-4.3";
+const DIRV = { up: [-1, 0], down: [1, 0], left: [0, -1], right: [0, 1] };
+
+// SKILL.md memory — READ-ONLY during play. Starts nearly empty: no strategy,
+// no predefined keywords. Grok decides each move from the game state + these
+// notes, so early games look near-random (expected). Learning that fills these
+// in comes in STEP 3.
+const MEMORY = {
+  atlanta:  "# Atlanta\n\n(no strategy yet — learning comes later)\n",
+  berkeley: "# Berkeley\n\n(no strategy yet — learning comes later)\n",
+  chicago:  "# Chicago\n\n(no strategy yet — learning comes later)\n",
+  delaware: "# Delaware\n\n(no strategy yet — learning comes later)\n",
+  team:     "# Team (shared)\n\n(no shared strategy yet — learning comes later)\n",
 };
 
 // Turn cycle: Pac-Man, then the four ghosts.
@@ -736,6 +715,124 @@ function ghostMoveRandom(g) {
 const caught = () => GHOSTS.some(g => samePos(g.pos, PACMAN.pos));
 
 // ===================================================================
+// Grok ghost brains. Each ghost's sub-turn asks Grok to pick one legal move
+// from the game state + its own .md + team.md (no predefined strategy keywords).
+// ===================================================================
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const oneLine = s => (s || "").replace(/\s+/g, " ").trim().slice(0, 160);
+function dirOf(from, to) {
+  const dr = to.r - from.r, dc = to.c - from.c;
+  if (dr === -1 && dc === 0) return "up";
+  if (dr === 1 && dc === 0) return "down";
+  if (dr === 0 && dc === -1) return "left";
+  if (dr === 0 && dc === 1) return "right";
+  return "stay";
+}
+
+// Build the textual decision context handed to Grok for ghost index i (1..4).
+function buildGhostContext(i) {
+  const g = GHOSTS[i - 1];
+  const others = GHOSTS
+    .filter((_, j) => j !== i - 1)
+    .map(o => `${o.name} (${o.pos.r},${o.pos.c})`).join(", ");
+  const legal = ["up", "down", "left", "right"].map(dir => {
+    const [dr, dc] = DIRV[dir];
+    const r = g.pos.r + dr, c = g.pos.c + dc;
+    return isFloor(r, c) ? `${dir}→(${r},${c}) open` : `${dir}→wall`;
+  }).join(", ");
+  return [
+    `You are the ghost ${g.name} in a turn-based chase on a 10x10 grid (coordinates are row,col with row 0 at the top).`,
+    `Ghosts win by moving onto Pac-Man's cell. It is your move.`,
+    ``,
+    `MAZE (#=wall, .=floor):`,
+    MAZE_TEXT,
+    ``,
+    `Pac-Man is at (${PACMAN.pos.r},${PACMAN.pos.c}).`,
+    `You, ${g.name}, are at (${g.pos.r},${g.pos.c}).`,
+    `Other ghosts: ${others}.`,
+    `Your legal moves: ${legal}.`,
+    ``,
+    `--- your notes (${g.name.toLowerCase()}.md) ---`,
+    (MEMORY[g.key] || "").trim(),
+    `--- team notes (team.md) ---`,
+    (MEMORY.team || "").trim(),
+    ``,
+    `Choose exactly ONE legal move (one that is "open", not a wall).`,
+    `Reply on a single line EXACTLY as:  MOVE: <up|down|left|right> | REASON: <one short sentence>`,
+  ].join("\n");
+}
+
+// Parse Grok's reply into a legal move; returns {dir, move, reason} or null.
+function parseGhostReply(reply, g) {
+  const low = (reply || "").toLowerCase();
+  const m = low.match(/move:\s*(up|down|left|right)/) || low.match(/\b(up|down|left|right)\b/);
+  if (!m) return null;
+  const dir = m[1];
+  const [dr, dc] = DIRV[dir];
+  const move = { r: g.pos.r + dr, c: g.pos.c + dc };
+  if (!isFloor(move.r, move.c)) return null;                 // illegal -> reject
+  const rm = reply.match(/reason:\s*([\s\S]+)/i);
+  return { dir, move, reason: rm ? oneLine(rm[1]) : oneLine(reply) };
+}
+
+async function callGrok(messages, key) {
+  const res = await fetch(GROK_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Authorization": "Bearer " + key },
+    body: JSON.stringify({ model: GROK_MODEL, messages }),
+  });
+  if (!res.ok) { const e = new Error("Grok HTTP " + res.status); e.status = res.status; throw e; }
+  const data = await res.json();
+  const text = data?.choices?.[0]?.message?.content;
+  if (!text) throw new Error("Grok: empty response");
+  return text;
+}
+
+// Decide ghost i's move via Grok: ~5 tries with backoff+jitter, then random.
+async function decideGhostGrok(i, key) {
+  const g = GHOSTS[i - 1];
+  const legal = moveOptions(g.pos, false);
+  if (!legal.length) return { move: { ...g.pos }, dir: "stay", reason: "no legal move", fallback: false };
+
+  const messages = [
+    { role: "system", content: "You control one ghost cooperating with three others to catch Pac-Man in a maze. Think briefly, then answer in the exact requested format." },
+    { role: "user", content: buildGhostContext(i) },
+  ];
+  const TRIES = 5;
+  for (let attempt = 0; attempt < TRIES; attempt++) {
+    try {
+      const reply = await callGrok(messages, key);
+      const parsed = parseGhostReply(reply, g);
+      if (parsed) return { ...parsed, fallback: false };
+      throw new Error("unparseable/illegal reply: " + oneLine(reply));
+    } catch (e) {
+      console.log(`[OmegaPacman] ${g.name} try ${attempt + 1}/${TRIES} failed: ${e.message}`);
+      if (attempt < TRIES - 1) await sleep(500 * Math.pow(2, attempt) + Math.random() * 400);
+    }
+  }
+  const mv = pickRandom(legal);
+  console.log(`[OmegaPacman] ${g.name}: all ${TRIES} tries failed — random fallback ${dirOf(g.pos, mv)}`);
+  return { move: mv, dir: dirOf(g.pos, mv), reason: "(random fallback — Grok unavailable)", fallback: true };
+}
+
+// Show the latest ghost decision (move + reason) under the board.
+function showMoveInfo(g, dec) {
+  const el = document.getElementById("moveinfo");
+  el.classList.remove("thinking");
+  el.innerHTML =
+    `<span class="mi-actor" style="color:${g.color}">${g.name} → ${dec.dir}</span>` +
+    `<span class="mi-reason">${dec.fallback ? " " : " · "}${escapeHtml(dec.reason)}</span>`;
+}
+function setThinking(g) {
+  const el = document.getElementById("moveinfo");
+  el.classList.add("thinking");
+  el.textContent = `${g.name} is deciding…`;
+}
+function escapeHtml(s) {
+  return (s || "").replace(/[&<>]/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[ch]));
+}
+
+// ===================================================================
 // Round / turn flow
 // ===================================================================
 function startGame() {                 // begin a fresh series at round 1
@@ -796,21 +893,43 @@ function restore(s) {
 
 // ---- transport controls: << (back), Play/Pause, >> (forward) ------------
 // Forward = one SUB-TURN: the current actor moves, then the pointer advances.
-function stepForward() {
-  if (game.status !== "playing") return;
-  history.push(snapshot());
+// Async because ghost moves call Grok. `stepping` guards against re-entry.
+let stepping = false;
+let playing = false;
 
+async function stepForward() {
+  if (game.status !== "playing" || stepping) return;
+  stepping = true;
+  try { await doSubTurn(); }
+  finally { stepping = false; }
+}
+
+async function doSubTurn() {
+  history.push(snapshot());
   const i = game.actor;
+
   if (i === 0) {
-    pacmanMove();
+    pacmanMove();                                  // Pac-Man: forage-and-evade (local)
   } else {
-    ghostMoveRandom(GHOSTS[i - 1]);
-    game.score = Math.max(0, game.score - 1);     // each ghost move costs -1
+    const g = GHOSTS[i - 1];
+    let dec;
+    if (game.apiKey) {
+      setThinking(g);
+      dec = await decideGhostGrok(i, game.apiKey); // Grok decides
+      if (game.status !== "playing") return;       // game was reset mid-call
+    } else {
+      const opts = moveOptions(g.pos, false);
+      const mv = opts.length ? pickRandom(opts) : { ...g.pos };
+      dec = { move: mv, dir: dirOf(g.pos, mv), reason: "(no API key — random move)", fallback: true };
+    }
+    g.pos = dec.move;
+    game.score = Math.max(0, game.score - 1);       // each ghost move costs -1
+    showMoveInfo(g, dec);
   }
 
-  if (caught()) { endGame(true); return; }        // a ghost (or Pac-Man) collided
+  if (caught()) { endGame(true); return; }          // collision -> ghosts win
 
-  if (i === ACTORS.length - 1) {                   // Delaware finished the turn
+  if (i === ACTORS.length - 1) {                     // Delaware finished the turn
     game.actor = 0;
     game.turn += 1;
     if (game.turn > MAX_TURN) { game.score = 0; endGame(false); return; }
@@ -827,21 +946,23 @@ function stepBackward() {
   renderGame();
 }
 
-let playTimer = null;
+// Play = auto-advance via a self-scheduling loop (waits for each async sub-turn).
 function setPlaying(on) {
-  const btn = document.getElementById("playBtn2");
-  if (on) {
-    if (!playTimer) playTimer = setInterval(stepForward, 550);
-    btn.innerHTML = "&#10073;&#10073; Pause";
-  } else {
-    if (playTimer) { clearInterval(playTimer); playTimer = null; }
-    btn.innerHTML = "&#9654; Play";
+  playing = on;
+  document.getElementById("playBtn2").innerHTML = on ? "&#10073;&#10073; Pause" : "&#9654; Play";
+  if (on) playLoop();
+}
+async function playLoop() {
+  while (playing && game.status === "playing") {
+    await stepForward();
+    if (!playing) break;
+    await sleep(300);
   }
 }
 
 document.getElementById("fwdBtn").addEventListener("click", () => { setPlaying(false); stepForward(); });
 document.getElementById("backBtn").addEventListener("click", () => { setPlaying(false); stepBackward(); });
-document.getElementById("playBtn2").addEventListener("click", () => setPlaying(!playTimer));
+document.getElementById("playBtn2").addEventListener("click", () => setPlaying(!playing));
 
 function endGame(win) {
   game.status = "over";
@@ -937,12 +1058,12 @@ function renderGhostMem() {
   // Pac-Man has no .md (it doesn't learn) — show the "?" placeholder instead.
   document.getElementById("ghostMd").classList.toggle("hidden", isPac);
   document.getElementById("pacNoMem").classList.toggle("hidden", !isPac);
-  if (!isPac) document.getElementById("ghostMd").textContent = MOCK_MEMORY[game.activeGhost];
+  if (!isPac) document.getElementById("ghostMd").textContent = MEMORY[game.activeGhost];
   document.querySelectorAll("#ghostTabs .memtab").forEach(t =>
     t.classList.toggle("active", t.dataset.ghost === game.activeGhost));
 }
 function renderTeamMem() {
-  document.getElementById("teamMd").textContent = MOCK_MEMORY.team;
+  document.getElementById("teamMd").textContent = MEMORY.team;
 }
 // Tabs can also be clicked manually (still auto-follows the actor on Step).
 document.querySelectorAll("#ghostTabs .memtab").forEach(tab =>
@@ -967,11 +1088,11 @@ function openMdModal(title, body) {
 // Clicking the per-actor box opens the current actor's full content.
 function openActorMem() {
   if (game.activeGhost === "pacman") openMdModal("Pacman", PAC_NO_MEM_TEXT);
-  else openMdModal(cap(game.activeGhost), MOCK_MEMORY[game.activeGhost]);
+  else openMdModal(cap(game.activeGhost), MEMORY[game.activeGhost]);
 }
 document.getElementById("ghostMd").addEventListener("click", openActorMem);
 document.getElementById("pacNoMem").addEventListener("click", openActorMem);
-document.getElementById("teamMd").addEventListener("click", () => openMdModal("Team", MOCK_MEMORY.team));
+document.getElementById("teamMd").addEventListener("click", () => openMdModal("Team", MEMORY.team));
 document.getElementById("mdModalClose").addEventListener("click", () =>
   document.getElementById("mdModal").classList.add("hidden"));
 
