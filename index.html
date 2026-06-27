@@ -130,6 +130,21 @@
   }
   #brainbar input { width: 280px; max-width: 60vw; }
   .note { opacity: 0.6; font-size: 12px; }
+  #learnbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; justify-content: center; }
+  #curve {
+    width: 540px;
+    max-width: 90vw;
+    white-space: pre;
+    overflow: auto;
+    max-height: 220px;
+    background: #05051a;
+    border: 1px solid #2a2a6a;
+    border-radius: 6px;
+    padding: 12px;
+    font-size: 12px;
+    line-height: 1.5;
+    margin: 0;
+  }
   button {
     font: inherit;
     padding: 8px 16px;
@@ -245,6 +260,14 @@
     </label>
     <span id="brainnote" class="note">Stub mode — no API calls.</span>
   </div>
+
+  <div id="learnbar">
+    <button id="learn1">Learn 1 round</button>
+    <button id="learn3">Learn 3 rounds</button>
+    <span id="learnnote" class="note">Reflexion: play a batch, then Gemini rewrites the 5 .md files to catch better. Needs an API key.</span>
+  </div>
+
+  <pre id="curve">No learning rounds yet. Enter a Gemini key and click “Learn”.</pre>
 
   <details>
     <summary>Decision context (Ghost A, latest turn) — what each ghost brain reads</summary>
@@ -639,19 +662,15 @@ const getMode = () => document.getElementById("mode").value;
 const getApiKey = () => document.getElementById("apikey").value.trim();
 const geminiActive = () => getMode() === "gemini" && !!getApiKey();
 
-async function callGemini(apiKeyStr, context) {
-  const prompt =
-    "You are ONE ghost in a turn-based Pac-Man chase on a 10x10 grid. Use the " +
-    "game state and your strategy notes to choose this ghost's single move.\n\n" +
-    context +
-    "\n\nReply with EXACTLY one word naming the direction to move, chosen from " +
-    "LEGAL MOVES (up, down, left, or right). Output only that word.";
+async function callGeminiRaw(apiKeyStr, prompt, maxOutputTokens, jsonMode) {
+  const cfg = { temperature: 0.7, maxOutputTokens };
+  if (jsonMode) cfg.responseMimeType = "application/json";
   const res = await fetch(GEMINI_URL(GEMINI_MODEL) + "?key=" + encodeURIComponent(apiKeyStr), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       contents: [{ parts: [{ text: prompt }] }],
-      generationConfig: { temperature: 0.7, maxOutputTokens: 64 },
+      generationConfig: cfg,
     }),
   });
   if (!res.ok) throw new Error("Gemini HTTP " + res.status);
@@ -659,6 +678,16 @@ async function callGemini(apiKeyStr, context) {
   const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
   if (!text) throw new Error("Gemini: empty response");
   return text;
+}
+
+async function callGemini(apiKeyStr, context) {
+  const prompt =
+    "You are ONE ghost in a turn-based Pac-Man chase on a 10x10 grid. Use the " +
+    "game state and your strategy notes to choose this ghost's single move.\n\n" +
+    context +
+    "\n\nReply with EXACTLY one word naming the direction to move, chosen from " +
+    "LEGAL MOVES (up, down, left, or right). Output only that word.";
+  return callGeminiRaw(apiKeyStr, prompt, 64, false);
 }
 
 // Map a direction word to a legal move cell, or null if invalid.
@@ -840,6 +869,175 @@ function runBatch(n) {
 }
 
 // ===================================================================
+// Reflexion learning loop. Play a batch with the current .md strategies,
+// gather feedback (catch rate, avg turns, and WHERE Pac-Man escaped), then
+// ask Gemini to rewrite all 5 .md files using only the directive vocabulary.
+// Apply, re-measure, repeat. The stub (not the API) plays the games; Gemini
+// is used only to author the strategies.
+// ===================================================================
+const DEAD_ENDS = [[1,8],[5,6],[8,1],[8,8]];
+
+function sideOf(p) {
+  const v = p.r <= 3 ? "north" : p.r >= 6 ? "south" : "";
+  const h = p.c <= 3 ? "west" : p.c >= 6 ? "east" : "";
+  return v || h || "center";
+}
+
+// Headless batch that also reports where the ghosts FAILED (Pac-Man survived).
+function simulateBatch(n) {
+  let catches = 0, turnsSum = 0, lost = 0, pelletSum = 0;
+  const lossCells = new Map();
+  const sides = { north: 0, south: 0, east: 0, west: 0, center: 0 };
+  for (let i = 0; i < n; i++) {
+    const st = makeState();
+    let term = null;
+    while ((term = advance(st)) === null) { /* play out */ }
+    pelletSum += st.pelletsEaten;
+    if (term === "caught") { catches += 1; turnsSum += st.score; }
+    else {                                   // escaped / cleared = ghosts lost
+      lost += 1;
+      const k = key(st.pacman.r, st.pacman.c);
+      lossCells.set(k, (lossCells.get(k) || 0) + 1);
+      sides[sideOf(st.pacman)] += 1;
+    }
+  }
+  const topCells = [...lossCells.entries()]
+    .sort((a, b) => b[1] - a[1]).slice(0, 4)
+    .map(([k, v]) => `(${k})×${v}`);
+  return {
+    games: n, catches, lost,
+    catchRate: catches / n * 100,
+    avgTurns: catches ? turnsSum / catches : null,
+    avgPellets: pelletSum / n,
+    sides, topCells,
+  };
+}
+
+function buildReflexionPrompt(summary) {
+  const cur = ["ghost_a", "ghost_b", "ghost_c", "ghost_d", "team"]
+    .map(k => `=== ${k}.md ===\n${(SKILLS[k] || "").trim()}`).join("\n\n");
+  const s = summary;
+  return [
+    "You are the COACH of four ghosts (A, B, C, D) learning to cooperatively catch",
+    "Pac-Man in a turn-based 10x10 maze. Each turn Pac-Man moves one cell (it flees",
+    "and eats pellets), then all four ghosts move one cell. Ghosts win by landing on",
+    "Pac-Man; they lose if he survives 60 turns. You improve the team by REWRITING",
+    "their strategy files.",
+    "",
+    "MAZE (#=wall, .=floor):",
+    MAZE_TEXT,
+    `Single-cell CHOKE points (ideal guard cells): ${CHOKES.map(c => "(" + c + ")").join(" ")}`,
+    `DEAD-END pockets (corner Pac-Man here): ${DEAD_ENDS.map(c => "(" + c + ")").join(" ")}`,
+    "",
+    "RESULTS of the last batch with the CURRENT strategies:",
+    `- Catch rate: ${s.catchRate.toFixed(1)}%`,
+    `- Avg turns-to-catch: ${s.avgTurns ? s.avgTurns.toFixed(1) : "n/a"}`,
+    `- Pac-Man escaped ${s.lost} games; he survived most often toward: ` +
+      Object.entries(s.sides).map(([k, v]) => `${k}=${v}`).join(", "),
+    `- Most common escape cells: ${s.topCells.join(", ") || "none"}`,
+    "",
+    "CURRENT strategy files:",
+    cur,
+    "",
+    "Your job: REWRITE all five files to raise the catch rate and lower turns-to-catch",
+    "through COOPERATION (surround, cut off escape routes, guard the chokes nearest",
+    "where Pac-Man escapes, herd him into dead-ends, support each other to flank).",
+    "",
+    "HARD CONSTRAINTS:",
+    "- Use ONLY these directives, one per line:",
+    "    chase | intercept | guard r,c | herd <north|south|east|west> | support <A|B|C|D>",
+    "- guard coordinates must be floor cells (prefer the choke cells listed above).",
+    "- Keep each file short and HUMAN-READABLE.",
+    "- Every file must include at least one `# reason: ...` comment line explaining the change.",
+    "- Comment lines start with '#'. Directives are plain lines (no '#').",
+    "",
+    'Return ONLY a JSON object with the full new file contents as strings:',
+    '{"ghost_a":"...","ghost_b":"...","ghost_c":"...","ghost_d":"...","team":"..."}',
+  ].join("\n");
+}
+
+function parseSkillUpdate(text) {
+  let t = (text || "").trim()
+    .replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
+  const obj = JSON.parse(t);
+  const keys = ["ghost_a", "ghost_b", "ghost_c", "ghost_d", "team"];
+  const out = {};
+  for (const k of keys) {
+    if (typeof obj[k] !== "string") throw new Error("response missing string for " + k);
+    out[k] = obj[k];
+  }
+  return out;
+}
+
+let LEARN_ROUNDS = [];          // [{ round, catchRate, avgTurns }]
+let LAST_SUMMARY = null;        // most recent batch feedback (for the next prompt)
+let learning = false;
+const LEARN_BATCH = 120;
+
+function renderCurve() {
+  const el = document.getElementById("curve");
+  if (!LEARN_ROUNDS.length) { el.textContent = "No learning rounds yet."; return; }
+  const lines = LEARN_ROUNDS.map(r => {
+    const bars = "█".repeat(Math.round(r.catchRate / 5)).padEnd(20, "·");
+    const avg = r.avgTurns != null ? r.avgTurns.toFixed(1) : "—";
+    const tag = r.round === 0 ? "(start)" : "";
+    return `Round ${String(r.round).padStart(2)} ${tag.padEnd(7)} ${bars} ${r.catchRate.toFixed(1).padStart(5)}%  avg ${avg} turns`;
+  });
+  const first = LEARN_ROUNDS[0].catchRate, last = LEARN_ROUNDS[LEARN_ROUNDS.length - 1].catchRate;
+  lines.push(`Δ catch rate: ${(last - first >= 0 ? "+" : "")}${(last - first).toFixed(1)} points across ${LEARN_ROUNDS.length - 1} round(s)`);
+  el.textContent = lines.join("\n");
+}
+
+function setLearnDisabled(on) {
+  document.getElementById("learn1").disabled = on;
+  document.getElementById("learn3").disabled = on;
+}
+
+async function learn(rounds) {
+  if (learning) return;
+  const apiKeyStr = getApiKey();
+  if (!apiKeyStr) {
+    setStatus("No API key — learning skipped. Enter a Gemini key in the brain bar to learn.");
+    document.getElementById("learnnote").textContent =
+      "No API key set — enter one above to enable Reflexion learning.";
+    return;
+  }
+  learning = true;
+  setLearnDisabled(true);
+  try {
+    // Round 0: measure the current strategies as the starting point.
+    if (!LEARN_ROUNDS.length) {
+      LAST_SUMMARY = simulateBatch(LEARN_BATCH);
+      LEARN_ROUNDS.push({ round: 0, catchRate: LAST_SUMMARY.catchRate, avgTurns: LAST_SUMMARY.avgTurns });
+      renderCurve();
+    }
+    for (let r = 0; r < rounds; r++) {
+      const roundNo = LEARN_ROUNDS.length;            // next round index
+      setStatus(`Learning round ${roundNo}: Gemini is rewriting the strategies from the last batch…`);
+      let updated;
+      try {
+        const raw = await callGeminiRaw(apiKeyStr, buildReflexionPrompt(LAST_SUMMARY), 2048, true);
+        updated = parseSkillUpdate(raw);
+      } catch (e) {
+        setStatus(`Learning stopped in round ${roundNo}: ${e.message}`);
+        break;
+      }
+      for (const k of Object.keys(updated)) SKILLS[k] = updated[k];
+      renderSkillView();                              // user watches the .md fill in
+      LAST_SUMMARY = simulateBatch(LEARN_BATCH);      // re-measure with new strategies
+      LEARN_ROUNDS.push({ round: roundNo, catchRate: LAST_SUMMARY.catchRate, avgTurns: LAST_SUMMARY.avgTurns });
+      renderCurve();
+      renderStats();
+      setStatus(`Round ${roundNo}: ${LAST_SUMMARY.catchRate.toFixed(1)}% catch, avg ` +
+        `${LAST_SUMMARY.avgTurns ? LAST_SUMMARY.avgTurns.toFixed(1) : "—"} turns-to-catch.`);
+    }
+  } finally {
+    learning = false;
+    setLearnDisabled(false);
+  }
+}
+
+// ===================================================================
 // Rendering.
 // ===================================================================
 const board = document.getElementById("board");
@@ -956,6 +1154,8 @@ document.getElementById("batch").addEventListener("click", () => runBatch(200));
 document.getElementById("resetstats").addEventListener("click", resetStats);
 document.getElementById("mode").addEventListener("change", updateBrainNote);
 document.getElementById("apikey").addEventListener("input", updateBrainNote);
+document.getElementById("learn1").addEventListener("click", () => learn(1));
+document.getElementById("learn3").addEventListener("click", () => learn(3));
 document.getElementById("clearlog").addEventListener("click", (e) => {
   e.preventDefault();
   DEBUG_LINES.length = 0;
@@ -1018,6 +1218,9 @@ window.OMEGA = {
   newGame,
   runBatch,
   resetStats,
+  learn,
+  simulateBatch,
+  get learnRounds() { return LEARN_ROUNDS.map(r => ({ ...r })); },
   get brain() { return { mode: getMode(), hasKey: !!getApiKey(), fallbacks: GEMINI_FALLBACKS }; },
   buildContext: i => buildContext(state, i),  // inspect a ghost's context
   get stats() { return { ...STATS }; },
