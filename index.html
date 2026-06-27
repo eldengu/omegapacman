@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>OmegaPacman — game-v1</title>
+<style>
+  :root {
+    --cell: 44px;
+    --wall: #14143a;
+    --floor: #1d1d4d;
+    --bg: #0a0a23;
+    --ink: #e8e8ff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 16px;
+    padding: 24px;
+    font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+    background: var(--bg);
+    color: var(--ink);
+  }
+  h1 { margin: 0; font-size: 22px; letter-spacing: 1px; }
+  .sub { margin: -8px 0 0; font-size: 12px; opacity: 0.6; }
+
+  #board {
+    display: grid;
+    grid-template-columns: repeat(10, var(--cell));
+    grid-template-rows: repeat(10, var(--cell));
+    gap: 2px;
+    background: #000;
+    padding: 6px;
+    border-radius: 8px;
+    box-shadow: 0 0 0 2px #2a2a6a;
+  }
+  .cell {
+    width: var(--cell);
+    height: var(--cell);
+    background: var(--floor);
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+  }
+  .cell.wall { background: var(--wall); border-radius: 6px; }
+
+  /* Pac-Man: yellow disc with a wedge mouth */
+  .pac {
+    width: 72%;
+    height: 72%;
+    border-radius: 50%;
+    background: #ffe000;
+    clip-path: polygon(100% 35%, 50% 50%, 100% 65%, 100% 0, 0 0, 0 100%, 100% 100%);
+  }
+  /* Ghosts: colored blobs with a flat-ish bottom */
+  .ghost {
+    width: 72%;
+    height: 72%;
+    border-radius: 50% 50% 18% 18%;
+    position: relative;
+  }
+  .ghost::before, .ghost::after {
+    content: "";
+    position: absolute;
+    top: 32%;
+    width: 22%;
+    height: 24%;
+    background: #fff;
+    border-radius: 50%;
+  }
+  .ghost::before { left: 18%; }
+  .ghost::after  { right: 18%; }
+
+  #hud {
+    display: flex;
+    gap: 22px;
+    font-size: 14px;
+    align-items: center;
+  }
+  #hud b { color: #ffe000; }
+  #status { font-size: 15px; min-height: 20px; font-weight: bold; }
+  .controls { display: flex; gap: 10px; }
+  button {
+    font: inherit;
+    padding: 8px 16px;
+    border: none;
+    border-radius: 6px;
+    background: #3a3a8a;
+    color: var(--ink);
+    cursor: pointer;
+  }
+  button:hover { background: #4a4aa8; }
+  button:disabled { opacity: 0.4; cursor: default; }
+</style>
+</head>
+<body>
+  <h1>OmegaPacman</h1>
+  <p class="sub">game-v1 — ghosts move randomly (SKILL.md brains come later)</p>
+
+  <div id="board" aria-label="game grid"></div>
+
+  <div id="hud">
+    <span>Turn: <b id="turn">0</b> / <b id="maxturn">0</b></span>
+    <span>Score: <b id="score">—</b></span>
+  </div>
+  <div id="status">Press Play to start the chase.</div>
+
+  <div class="controls">
+    <button id="play">Play</button>
+    <button id="step">Step</button>
+    <button id="new">New Game</button>
+  </div>
+
+<script>
+/* ===================================================================
+   OmegaPacman — game-v1
+   Turn-based grid chase. Pac-Man flees; 4 ghosts move randomly.
+   Game state is exposed at window.OMEGA for a future agent to read.
+   =================================================================== */
+
+// 10x10 fixed maze. 1 = wall, 0 = floor. All floor cells are connected.
+const MAZE = [
+  [1,1,1,1,1,1,1,1,1,1],
+  [1,0,0,0,0,0,0,0,0,1],
+  [1,0,1,0,1,1,0,1,0,1],
+  [1,0,1,0,0,0,0,1,0,1],
+  [1,0,0,0,1,1,0,0,0,1],
+  [1,0,0,0,1,1,0,0,0,1],
+  [1,0,1,0,0,0,0,1,0,1],
+  [1,0,1,0,1,1,0,1,0,1],
+  [1,0,0,0,0,0,0,0,0,1],
+  [1,1,1,1,1,1,1,1,1,1],
+];
+const SIZE = 10;
+const MAX_TURNS = 60;          // ghosts lose if Pac-Man survives this long
+const GHOST_COLORS = ["#ff4d4d", "#ff9ed8", "#36e0e0", "#ffae42"];
+
+// Starting positions (row, col). Pac-Man central-ish, ghosts in the corners.
+const START = {
+  pacman: { r: 4, c: 3 },
+  ghosts: [
+    { r: 1, c: 1 },
+    { r: 1, c: 8 },
+    { r: 8, c: 1 },
+    { r: 8, c: 8 },
+  ],
+};
+
+// ---- Mutable game state -------------------------------------------------
+let state;
+
+function newGame() {
+  state = {
+    grid: MAZE,                                  // reference; never mutated
+    pacman: { ...START.pacman },
+    ghosts: START.ghosts.map(g => ({ ...g })),
+    turn: 0,
+    maxTurns: MAX_TURNS,
+    score: null,                                 // turns-to-catch once caught
+    status: "ready",                             // ready | playing | caught | escaped
+  };
+  stopAuto();
+  render();
+  setStatus("Press Play to start the chase.");
+}
+
+// ---- Helpers ------------------------------------------------------------
+const isFloor = (r, c) =>
+  r >= 0 && r < SIZE && c >= 0 && c < SIZE && MAZE[r][c] === 0;
+
+const same = (a, b) => a.r === b.r && a.c === b.c;
+
+// Orthogonal neighbours that are floor, plus the option to stay put.
+function moveOptions(pos, includeStay) {
+  const opts = includeStay ? [{ ...pos }] : [];
+  const deltas = [[-1,0],[1,0],[0,-1],[0,1]];
+  for (const [dr, dc] of deltas) {
+    const r = pos.r + dr, c = pos.c + dc;
+    if (isFloor(r, c)) opts.push({ r, c });
+  }
+  return opts;
+}
+
+const manhattan = (a, b) => Math.abs(a.r - b.r) + Math.abs(a.c - b.c);
+
+function distToNearestGhost(cell) {
+  return Math.min(...state.ghosts.map(g => manhattan(cell, g)));
+}
+
+function pickRandom(arr) {
+  return arr[Math.floor(Math.random() * arr.length)];
+}
+
+// ---- Agent behaviour ----------------------------------------------------
+// Pac-Man: simple flee — pick the reachable cell that maximises distance
+// to the nearest ghost (staying put allowed), ties broken randomly.
+function pacmanMove() {
+  const options = moveOptions(state.pacman, true);
+  let best = -Infinity;
+  const bestCells = [];
+  for (const cell of options) {
+    const d = distToNearestGhost(cell);
+    if (d > best) { best = d; bestCells.length = 0; bestCells.push(cell); }
+    else if (d === best) bestCells.push(cell);
+  }
+  return pickRandom(bestCells);
+}
+
+// Ghost: random legal move (must move if any move exists).
+function ghostMove(ghost) {
+  const options = moveOptions(ghost, false);
+  return options.length ? pickRandom(options) : { ...ghost };
+}
+
+// ---- Turn engine --------------------------------------------------------
+function step() {
+  if (state.status !== "ready" && state.status !== "playing") return;
+  state.status = "playing";
+  state.turn += 1;
+
+  // 1) Pac-Man moves one cell.
+  state.pacman = pacmanMove();
+  if (state.ghosts.some(g => same(g, state.pacman))) return endCaught();
+
+  // 2) Each ghost moves one cell; catch is checked after every ghost.
+  for (let i = 0; i < state.ghosts.length; i++) {
+    state.ghosts[i] = ghostMove(state.ghosts[i]);
+    if (same(state.ghosts[i], state.pacman)) return endCaught();
+  }
+
+  // 3) Out of turns? Pac-Man escapes and the ghosts lose.
+  if (state.turn >= state.maxTurns) {
+    state.status = "escaped";
+    stopAuto();
+    render();
+    setStatus(`Pac-Man escaped after ${state.maxTurns} turns — ghosts lose.`);
+    return;
+  }
+
+  render();
+}
+
+function endCaught() {
+  state.status = "caught";
+  state.score = state.turn;
+  stopAuto();
+  render();
+  setStatus(`Caught in ${state.turn} turns! Ghosts win (lower is better).`);
+}
+
+// ---- Rendering ----------------------------------------------------------
+const board = document.getElementById("board");
+
+function buildBoard() {
+  board.innerHTML = "";
+  for (let r = 0; r < SIZE; r++) {
+    for (let c = 0; c < SIZE; c++) {
+      const div = document.createElement("div");
+      div.className = "cell" + (MAZE[r][c] === 1 ? " wall" : "");
+      div.id = `cell-${r}-${c}`;
+      board.appendChild(div);
+    }
+  }
+}
+
+function render() {
+  // Clear any entities from floor cells.
+  document.querySelectorAll(".cell").forEach(c => { c.innerHTML = ""; });
+
+  state.ghosts.forEach((g, i) => {
+    const cell = document.getElementById(`cell-${g.r}-${g.c}`);
+    if (!cell) return;
+    const el = document.createElement("div");
+    el.className = "ghost";
+    el.style.background = GHOST_COLORS[i];
+    cell.appendChild(el);
+  });
+
+  const p = document.getElementById(`cell-${state.pacman.r}-${state.pacman.c}`);
+  if (p) {
+    const el = document.createElement("div");
+    el.className = "pac";
+    p.appendChild(el);
+  }
+
+  document.getElementById("turn").textContent = state.turn;
+  document.getElementById("maxturn").textContent = state.maxTurns;
+  document.getElementById("score").textContent =
+    state.score == null ? "—" : state.score;
+}
+
+function setStatus(msg) {
+  document.getElementById("status").textContent = msg;
+}
+
+// ---- Auto-play loop -----------------------------------------------------
+let timer = null;
+const playBtn = document.getElementById("play");
+
+function startAuto() {
+  if (timer) return;
+  timer = setInterval(step, 400);
+  playBtn.textContent = "Pause";
+}
+function stopAuto() {
+  if (timer) { clearInterval(timer); timer = null; }
+  playBtn.textContent = "Play";
+}
+function toggleAuto() {
+  if (state.status === "caught" || state.status === "escaped") return;
+  timer ? stopAuto() : startAuto();
+}
+
+// ---- Wiring -------------------------------------------------------------
+playBtn.addEventListener("click", toggleAuto);
+document.getElementById("step").addEventListener("click", () => {
+  stopAuto();
+  step();
+});
+document.getElementById("new").addEventListener("click", newGame);
+
+// ---- Public API for a future SKILL.md-driven agent ----------------------
+// Read-only snapshot of the world; deep-copied so callers can't mutate state.
+window.OMEGA = {
+  getState() {
+    return {
+      grid: MAZE.map(row => row.slice()),
+      pacman: { ...state.pacman },
+      ghosts: state.ghosts.map(g => ({ ...g })),
+      turn: state.turn,
+      maxTurns: state.maxTurns,
+      score: state.score,
+      status: state.status,
+    };
+  },
+  step,            // advance one full turn
+  newGame,         // reset
+  config: { SIZE, MAX_TURNS, START },
+};
+
+// ---- Boot ---------------------------------------------------------------
+buildBoard();
+newGame();
+</script>
+</body>
+</html>
