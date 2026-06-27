@@ -154,6 +154,26 @@
     font-size: 11px;
     line-height: 1.35;
   }
+  #debug {
+    white-space: pre-wrap;
+    overflow: auto;
+    max-height: 300px;
+    background: #05051a;
+    border: 1px solid #2a2a6a;
+    border-radius: 6px;
+    padding: 10px;
+    font-size: 11px;
+    line-height: 1.4;
+  }
+  #clearlog {
+    font: inherit;
+    font-size: 11px;
+    padding: 2px 8px;
+    margin-left: 8px;
+    background: #20204e;
+    border: 1px solid #2a2a6a;
+    border-radius: 5px;
+  }
 
   /* SKILL.md viewer */
   #skills { width: 540px; max-width: 90vw; display: flex; flex-direction: column; gap: 8px; }
@@ -228,6 +248,13 @@
   <details>
     <summary>Decision context (Ghost A, latest turn) — what each ghost brain reads</summary>
     <pre id="ctx">Run a turn to populate the decision context.</pre>
+  </details>
+
+  <details id="debugwrap" open>
+    <summary>Gemini decision log — raw response + parse/fallback reason per ghost
+      <button id="clearlog" type="button">clear</button>
+    </summary>
+    <pre id="debug">No Gemini calls yet. Switch brain to "Gemini", enter a key, and play.</pre>
   </details>
 
   <div id="skills">
@@ -587,8 +614,11 @@ function dirToMove(g, word, legal) {
 }
 
 // Decide one ghost's move via Gemini, with one retry, falling back to the stub.
+// Every attempt is logged (raw response + parse/fallback reason) for visibility;
+// the decision logic itself is unchanged.
 async function geminiGhostMove(st, i, apiKeyStr) {
   const g = st.ghosts[i];
+  const id = GHOST_IDS[i].toUpperCase();
   const legal = moveOptions(g, false);
   if (!legal.length) return { ...g };
 
@@ -596,14 +626,44 @@ async function geminiGhostMove(st, i, apiKeyStr) {
   if (i === 0) LAST_CONTEXT = context;
 
   for (let attempt = 0; attempt < 2; attempt++) {
+    const last = attempt === 1;
     try {
       const word = await callGemini(apiKeyStr, context);
       const move = dirToMove(g, word, legal);
-      if (move) return move;
-    } catch (_) { /* retry once, then fall through to the stub */ }
+      if (move) {
+        logGhost(st.turn, id, attempt, "ok",
+          `raw="${oneLine(word)}" → ${dirOf(g, move)} (${move.r},${move.c})`);
+        return move;
+      }
+      logGhost(st.turn, id, attempt, "parse-fail",
+        `raw="${oneLine(word)}" → no legal direction in reply; ` +
+        `legal=[${legal.map(m => dirOf(g, m)).join("/")}]; ${last ? "→ stub fallback" : "retrying"}`);
+    } catch (e) {
+      logGhost(st.turn, id, attempt, "error",
+        `${e.message}; ${last ? "→ stub fallback" : "retrying"}`);
+    }
   }
   GEMINI_FALLBACKS += 1;
-  return decideGhostMove(st, i);
+  const sm = decideGhostMove(st, i);
+  logGhost(st.turn, id, "—", "stub",
+    `fell back to stub → ${dirOf(g, sm)} (${sm.r},${sm.c})`);
+  return sm;
+}
+
+// ---- Gemini decision log ------------------------------------------------
+const DEBUG_LINES = [];
+const oneLine = s => (s || "").replace(/\s+/g, " ").trim().slice(0, 140);
+
+function logGhost(turn, id, attempt, kind, msg) {
+  const line = `t${turn} ${id} a${attempt} [${kind}] ${msg}`;
+  console.log("[OmegaPacman]", line);
+  DEBUG_LINES.push(line);
+  if (DEBUG_LINES.length > 300) DEBUG_LINES.splice(0, DEBUG_LINES.length - 300);
+  const el = document.getElementById("debug");
+  if (el) {
+    el.textContent = DEBUG_LINES.join("\n");
+    el.scrollTop = el.scrollHeight;
+  }
 }
 
 // Async turn: Pac-Man (local) then all 4 ghosts decided in PARALLEL via Gemini.
@@ -839,6 +899,11 @@ document.getElementById("batch").addEventListener("click", () => runBatch(200));
 document.getElementById("resetstats").addEventListener("click", resetStats);
 document.getElementById("mode").addEventListener("change", updateBrainNote);
 document.getElementById("apikey").addEventListener("input", updateBrainNote);
+document.getElementById("clearlog").addEventListener("click", (e) => {
+  e.preventDefault();
+  DEBUG_LINES.length = 0;
+  document.getElementById("debug").textContent = "(log cleared)";
+});
 
 // ---- SKILL.md viewer ----------------------------------------------------
 // Shows the live contents of whichever .md the ghosts are actually reading
