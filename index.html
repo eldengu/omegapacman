@@ -691,11 +691,38 @@ async function callGeminiRaw(apiKeyStr, prompt, maxOutputTokens, jsonMode) {
       generationConfig: cfg,
     }),
   });
-  if (!res.ok) throw new Error("Gemini HTTP " + res.status);
+  if (!res.ok) {
+    const err = new Error("Gemini HTTP " + res.status);
+    err.status = res.status;                       // let callers detect transient codes
+    throw err;
+  }
   const data = await res.json();
   const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
   if (!text) throw new Error("Gemini: empty response");
   return text;
+}
+
+// Retry transient server errors (429/500/503/504) with exponential backoff
+// (1s, 2s, 4s, 8s). onRetry is called before each wait so callers can surface
+// a "retrying…" note. Non-transient errors (and the final failure) re-throw.
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const TRANSIENT_STATUS = new Set([429, 500, 503, 504]);
+
+async function callGeminiWithRetry(apiKeyStr, prompt, maxOutputTokens, jsonMode, onRetry) {
+  const delays = [1000, 2000, 4000, 8000];
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await callGeminiRaw(apiKeyStr, prompt, maxOutputTokens, jsonMode);
+    } catch (e) {
+      if (TRANSIENT_STATUS.has(e.status) && attempt < delays.length) {
+        const wait = delays[attempt];
+        if (onRetry) onRetry(e, attempt + 1, delays.length, wait);
+        await sleep(wait);
+        continue;
+      }
+      throw e;
+    }
+  }
 }
 
 async function callGemini(apiKeyStr, context) {
@@ -1081,9 +1108,14 @@ async function learn(rounds) {
 
       let raw;
       try {
-        raw = await callGeminiRaw(apiKeyStr, buildReflexionPrompt(LAST_SUMMARY), 2048, false);
+        raw = await callGeminiWithRetry(
+          apiKeyStr, buildReflexionPrompt(LAST_SUMMARY), 2048, false,
+          (e, n, max, wait) => {
+            learnLog(`Round ${roundNo}: ${e.message} (transient) — retrying ${n}/${max} in ${wait / 1000}s…`);
+            setStatus(`Round ${roundNo}: ${e.message}; retrying ${n}/${max} in ${wait / 1000}s…`);
+          });
       } catch (e) {
-        learnLog(`Round ${roundNo}: Gemini call failed — ${e.message}. Skipping round.`);
+        learnLog(`Round ${roundNo}: Gemini call failed after retries — ${e.message}. Skipping round.`);
         setStatus(`Round ${roundNo}: Gemini call failed (${e.message}); round skipped.`);
         continue;                                     // skip gracefully, keep going
       }
