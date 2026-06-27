@@ -270,6 +270,23 @@
     overflow: auto;
     color: var(--ink);
   }
+  /* Pac-Man has no .md — show a big "?" instead */
+  .nomem {
+    flex: 1;
+    min-height: 0;
+    background: var(--floor);
+    border: 1px solid var(--edge);
+    border-radius: 8px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    text-align: center;
+    padding: 12px;
+  }
+  .nomem .qmark { font-size: 72px; font-weight: 900; color: var(--pac); text-shadow: 0 0 18px rgba(255,224,0,0.35); line-height: 1; }
+  .nomem .nomem-cap { color: var(--muted); font-size: 13px; max-width: 260px; }
 
   /* settings overlay */
   .overlay {
@@ -375,8 +392,9 @@
         <!-- TOP: per-ghost .md, auto-follows the current actor -->
         <div id="ghostMem" class="mempanel">
           <div class="memtop">
-            <h3>Ghost memory</h3>
+            <h3>Memory</h3>
             <div class="memtabs" id="ghostTabs">
+              <button class="memtab" data-ghost="pacman"   style="--accent:var(--pac)">Pacman</button>
               <button class="memtab" data-ghost="atlanta"  style="--accent:var(--atlanta)">Atlanta</button>
               <button class="memtab" data-ghost="berkeley" style="--accent:var(--berkeley)">Berkeley</button>
               <button class="memtab" data-ghost="chicago"  style="--accent:var(--chicago)">Chicago</button>
@@ -384,6 +402,10 @@
             </div>
           </div>
           <pre id="ghostMd" class="mdbox big"></pre>
+          <div id="pacNoMem" class="nomem hidden">
+            <div class="qmark">?</div>
+            <div class="nomem-cap">Pac-Man moves randomly — no memory, no strategy.</div>
+          </div>
         </div>
 
         <!-- BOTTOM: Team .md, always visible -->
@@ -597,7 +619,7 @@ function startGame() {
   game.turn = 1;
   game.score = START_SCORE;
   game.actor = 0;
-  game.activeGhost = "atlanta";
+  game.activeGhost = "pacman";
   buildBoard();
   renderTeamMem();
   renderGame();
@@ -612,8 +634,8 @@ function renderGame() {
   label.textContent = a.label;
   label.style.color = a.color;
 
-  // Top memory panel auto-follows the current actor when it's a ghost.
-  if (game.actor >= 1) game.activeGhost = GHOSTS[game.actor - 1].key;
+  // Top memory panel auto-follows the current actor (Pac-Man or a ghost).
+  game.activeGhost = game.actor === 0 ? "pacman" : GHOSTS[game.actor - 1].key;
   renderGhostMem();
 
   drawEntities();
@@ -711,7 +733,11 @@ document.getElementById("textToggle").addEventListener("click", () => {
 
 // ---- memory panel: TOP (per-ghost, auto-following) + BOTTOM (team) -------
 function renderGhostMem() {
-  document.getElementById("ghostMd").textContent = MOCK_MEMORY[game.activeGhost];
+  const isPac = game.activeGhost === "pacman";
+  // Pac-Man has no .md (it doesn't learn) — show the "?" placeholder instead.
+  document.getElementById("ghostMd").classList.toggle("hidden", isPac);
+  document.getElementById("pacNoMem").classList.toggle("hidden", !isPac);
+  if (!isPac) document.getElementById("ghostMd").textContent = MOCK_MEMORY[game.activeGhost];
   document.querySelectorAll("#ghostTabs .memtab").forEach(t =>
     t.classList.toggle("active", t.dataset.ghost === game.activeGhost));
 }
