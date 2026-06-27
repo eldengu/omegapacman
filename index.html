@@ -188,19 +188,20 @@
   }
   .tab:hover { background: #2c2c66; }
   .tab.active { background: #11112e; border-bottom-color: var(--accent, #36e0e0); }
-  #skillview {
-    white-space: pre-wrap;
-    overflow: auto;
-    min-height: 120px;
-    max-height: 280px;
+  #skilledit {
+    width: 100%;
+    min-height: 160px;
+    resize: vertical;
     background: #05051a;
+    color: var(--ink);
     border: 1px solid #2a2a6a;
     border-radius: 6px;
     padding: 12px;
+    font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
     font-size: 12px;
     line-height: 1.45;
-    margin: 0;
   }
+  .skillbtns { display: flex; gap: 10px; align-items: center; }
 </style>
 </head>
 <body>
@@ -258,7 +259,7 @@
   </details>
 
   <div id="skills">
-    <span class="label">SKILL.md files (the strategies each ghost reads — watch them change as the ghosts learn)</span>
+    <span class="label">SKILL.md files — editable strategies each ghost reads. Save updates the in-memory strategy used immediately (next game reflects it).</span>
     <div class="tabs">
       <button class="tab" data-skill="ghost_a" style="--accent:#ff4d4d">Ghost A</button>
       <button class="tab" data-skill="ghost_b" style="--accent:#ff9ed8">Ghost B</button>
@@ -266,7 +267,12 @@
       <button class="tab" data-skill="ghost_d" style="--accent:#ffae42">Ghost D</button>
       <button class="tab" data-skill="team"    style="--accent:#e8e8ff">Team</button>
     </div>
-    <pre id="skillview"></pre>
+    <textarea id="skilledit" spellcheck="false"></textarea>
+    <div class="skillbtns">
+      <button id="skillsave">Save</button>
+      <button id="skillreset">Reset to default</button>
+      <span id="skillnote" class="note"></span>
+    </div>
   </div>
 
 <script>
@@ -331,12 +337,27 @@ const MAZE_TEXT = MAZE.map(row => row.map(v => (v ? "#" : ".")).join("")).join("
 // (file://). When served over http(s) we fetch the real .md files so edits
 // to them take effect. The stub reads SKILLS[...] live at decision time.
 // ===================================================================
+const GHOST_DEFAULT = id =>
+  `# Ghost ${id} strategy\n` +
+  `# No directives yet — this ghost moves randomly.\n` +
+  `# Add directives below (one per line). See the Team tab for the vocabulary.\n`;
+const TEAM_DEFAULT =
+  `# Team strategy — shared directives applied to every ghost.\n` +
+  `#\n` +
+  `# Vocabulary (one directive per line; '#' lines are comments, ignored):\n` +
+  `#   chase                          move toward Pac-Man\n` +
+  `#   intercept                      cut off Pac-Man's likely next cell\n` +
+  `#   guard r,c                      hold / return to the choke cell (r,c)\n` +
+  `#   herd <north|south|east|west>   pressure Pac-Man toward that side\n` +
+  `#   support <A|B|C|D>              coordinate near that ghost\n` +
+  `#\n` +
+  `# A ghost may list several directives; they compose. team.md applies to all.\n`;
 const DEFAULT_SKILLS = {
-  ghost_a: "# Ghost A — strategy\n\nmove randomly for now\n\nstrategy: random\n",
-  ghost_b: "# Ghost B — strategy\n\nmove randomly for now\n\nstrategy: random\n",
-  ghost_c: "# Ghost C — strategy\n\nmove randomly for now\n\nstrategy: random\n",
-  ghost_d: "# Ghost D — strategy\n\nmove randomly for now\n\nstrategy: random\n",
-  team:    "# Team — shared strategy\n\nmove randomly for now\n",
+  ghost_a: GHOST_DEFAULT("A"),
+  ghost_b: GHOST_DEFAULT("B"),
+  ghost_c: GHOST_DEFAULT("C"),
+  ghost_d: GHOST_DEFAULT("D"),
+  team:    TEAM_DEFAULT,
 };
 let SKILLS = { ...DEFAULT_SKILLS };
 
@@ -493,20 +514,68 @@ function predictPacman(st) {
 // Ghost brains — SKILL.md driven.
 // ===================================================================
 
-// Read the active strategy for ghost i: its own .md wins, else team.md,
-// else default random. Recognised: random | chase | intercept | guard.
-function ghostStrategy(i) {
-  const own = SKILLS["ghost_" + GHOST_IDS[i]] || "";
-  const team = SKILLS["team"] || "";
-  const re = /strategy:\s*(random|chase|intercept|guard)/i;
-  let m = own.match(re);
-  if (m) return m[1].toLowerCase();
-  m = team.match(re);
-  if (m) return m[1].toLowerCase();
-  const blob = (own + "\n" + team).toLowerCase();
-  for (const s of ["chase", "intercept", "guard"])
-    if (new RegExp("\\b" + s + "\\b").test(blob)) return s;
-  return "random";
+// ---- Strategy vocabulary ------------------------------------------------
+// Ghosts read plain-English directives, one per line, from their own .md plus
+// the shared team.md. Lines starting with "#" are human-readable comments and
+// are ignored by the parser (but kept in the file). A ghost may list several
+// directives; they COMPOSE (each contributes a cost over candidate cells and
+// the ghost picks the move minimising the total), so a good mix cooperates.
+//
+//   chase                          move toward Pac-Man
+//   intercept                      move to cut off Pac-Man's likely next cell
+//   guard r,c                      hold / return to the choke cell (r,c)
+//   herd <north|south|east|west>   pressure Pac-Man toward that side / dead-end
+//   support <A|B|C|D>              coordinate near that ghost
+function parseDirectives(text) {
+  const dirs = [];
+  for (const raw of (text || "").split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;     // comment / blank
+    const low = line.toLowerCase();
+    let m;
+    if (/\bchase\b/.test(low)) dirs.push({ type: "chase" });
+    if (/\bintercept\b/.test(low)) dirs.push({ type: "intercept" });
+    if ((m = low.match(/\bguard\s+(\d+)\s*,\s*(\d+)/)))
+      dirs.push({ type: "guard", r: +m[1], c: +m[2] });
+    if ((m = low.match(/\bherd\s+(north|south|east|west)\b/)))
+      dirs.push({ type: "herd", dir: m[1] });
+    if ((m = low.match(/\bsupport\s+([abcd])\b/)))
+      dirs.push({ type: "support", who: m[1] });
+  }
+  return dirs;
+}
+
+// All directives for ghost i: its own .md first, then the shared team.md.
+function ghostDirectives(i) {
+  return parseDirectives(SKILLS["ghost_" + GHOST_IDS[i]])
+    .concat(parseDirectives(SKILLS["team"]));
+}
+
+// Anchor cell a "herd <dir>" ghost wants to occupy: the side of Pac-Man
+// OPPOSITE the push direction, so its pressure nudges Pac-Man toward <dir>.
+const HERD_OPPOSITE = { north: [1,0], south: [-1,0], east: [0,-1], west: [0,1] };
+function herdAnchor(st, dir) {
+  const [dr, dc] = HERD_OPPOSITE[dir];
+  const a = { r: st.pacman.r + dr, c: st.pacman.c + dc };
+  return isFloor(a.r, a.c) ? a : { ...st.pacman };
+}
+
+// Turn one directive into a cost function over candidate cells (lower = better).
+// Each precomputes its BFS field once so scoring a cell is just a lookup.
+function directiveCost(st, i, d) {
+  switch (d.type) {
+    case "chase":     { const f = bfsDist([st.pacman]);             return c => distOf(f, c); }
+    case "intercept": { const f = bfsDist([predictPacman(st)]);     return c => distOf(f, c); }
+    case "guard":     { const f = bfsDist([{ r: d.r, c: d.c }]);    return c => distOf(f, c); }
+    case "herd":      { const f = bfsDist([herdAnchor(st, d.dir)]); return c => distOf(f, c); }
+    case "support": {
+      const j = GHOST_IDS.indexOf(d.who);
+      if (j < 0 || j === i) return () => 0;           // can't support yourself
+      const f = bfsDist([st.ghosts[j]]);
+      return c => distOf(f, c);
+    }
+    default: return () => 0;
+  }
 }
 
 // Build the textual decision context handed to a ghost brain.
@@ -533,36 +602,24 @@ function buildContext(st, i) {
   ].join("\n");
 }
 
-// Decide one ghost's move from its decision context + SKILL.md directive.
+// Decide one ghost's move by composing its directives. With no directives the
+// ghost moves randomly; otherwise it picks the legal move that minimises the
+// summed cost of all its directives (its own .md + team.md), so a mix of
+// chase / guard / herd / support produces cooperative trapping.
 function decideGhostMove(st, i) {
   const g = st.ghosts[i];
   const legal = moveOptions(g, false);
   if (!legal.length) return { ...g };
 
-  // The full context is assembled every turn (this is what an LLM brain will
-  // receive later). The local stub only consults the parsed strategy for now.
+  // The full context is assembled every turn (also what a Gemini brain reads).
   const context = buildContext(st, i);
   if (i === 0) LAST_CONTEXT = context;
 
-  switch (ghostStrategy(i)) {
-    case "chase": {
-      const dist = bfsDist([st.pacman]);
-      return argminCell(legal, c => distOf(dist, c));
-    }
-    case "intercept": {
-      const dist = bfsDist([predictPacman(st)]);
-      return argminCell(legal, c => distOf(dist, c));
-    }
-    case "guard": {
-      // Head to the nearest choke point; break ties by closing on Pac-Man.
-      const toPac = bfsDist([st.pacman]);
-      return argminCell(legal, c =>
-        distOf(CHOKE_DIST, c) * 100 + distOf(toPac, c));
-    }
-    case "random":
-    default:
-      return pickRandom(legal);
-  }
+  const dirs = ghostDirectives(i);
+  if (!dirs.length) return pickRandom(legal);            // default: random
+
+  const costs = dirs.map(d => directiveCost(st, i, d));
+  return argminCell(legal, cell => costs.reduce((sum, f) => sum + f(cell), 0));
 }
 
 let LAST_CONTEXT = "";
@@ -905,17 +962,17 @@ document.getElementById("clearlog").addEventListener("click", (e) => {
   document.getElementById("debug").textContent = "(log cleared)";
 });
 
-// ---- SKILL.md viewer ----------------------------------------------------
-// Shows the live contents of whichever .md the ghosts are actually reading
-// (inline defaults via file://, or the fetched files when served). Re-render
-// after loadSkills()/reloadSkills() so learned edits show up here too.
+// ---- SKILL.md viewer/editor ---------------------------------------------
+// Each tab loads its .md into an editable textarea. Save writes the edited
+// text back into the in-memory SKILLS (the source of truth the ghosts read),
+// so the next game reflects it immediately. Reset restores the inline default.
 let activeSkill = "ghost_a";
 const skillTabs = [...document.querySelectorAll(".tab")];
+const skillEdit = document.getElementById("skilledit");
+const skillNote = document.getElementById("skillnote");
 
 function renderSkillView() {
-  const text = (SKILLS[activeSkill] || "").trim();
-  document.getElementById("skillview").textContent =
-    text || "(empty — this strategy file has no content yet)";
+  skillEdit.value = SKILLS[activeSkill] || "";
   skillTabs.forEach(t =>
     t.classList.toggle("active", t.dataset.skill === activeSkill));
 }
@@ -923,8 +980,20 @@ function renderSkillView() {
 skillTabs.forEach(tab => {
   tab.addEventListener("click", () => {
     activeSkill = tab.dataset.skill;
+    skillNote.textContent = "";
     renderSkillView();
   });
+});
+
+document.getElementById("skillsave").addEventListener("click", () => {
+  SKILLS[activeSkill] = skillEdit.value;        // in-memory is the source of truth
+  skillNote.textContent = "Saved — in effect next game.";
+});
+
+document.getElementById("skillreset").addEventListener("click", () => {
+  SKILLS[activeSkill] = DEFAULT_SKILLS[activeSkill] || "";
+  renderSkillView();
+  skillNote.textContent = "Reset to default.";
 });
 
 // ---- Public API ---------------------------------------------------------

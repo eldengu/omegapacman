@@ -1,5 +1,3 @@
-# Ghost D — strategy
-
-move randomly for now
-
-strategy: random
+# Ghost D strategy
+# No directives yet — this ghost moves randomly.
+# Add directives below (one per line). See team.md for the vocabulary.
