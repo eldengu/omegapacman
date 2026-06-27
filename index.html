@@ -512,12 +512,12 @@
 
 <script>
 /* ===================================================================
-   OmegaPacman — STEP 1: UI / screens mockup only.
-   No game logic, no API calls. Placeholder data + a Step button that
-   cycles the turn label and updates the (display-only) score/turn.
+   OmegaPacman — STEP 2-1: real turn-based game (random ghosts; no LLM yet).
+   Pac-Man forages pellets while evading ghosts; the 4 ghosts move randomly
+   (Grok-driven moves come in 2-2). Real sub-turn controls + scoring + rounds.
    =================================================================== */
 
-// ---- mock world data ----------------------------------------------------
+// ---- world data ---------------------------------------------------------
 const GHOSTS = [
   { key: "atlanta",  name: "Atlanta",  color: "var(--atlanta)",  pos: { r: 1, c: 1 } },
   { key: "berkeley", name: "Berkeley", color: "var(--berkeley)", pos: { r: 1, c: 8 } },
@@ -525,13 +525,17 @@ const GHOSTS = [
   { key: "delaware", name: "Delaware", color: "var(--delaware)", pos: { r: 8, c: 8 } },
 ];
 const PACMAN = { pos: { r: 5, c: 4 } };
-// NOTE for STEP 2 (real game logic — not implemented in this UI mockup):
-// Pac-Man should NOT move purely at random. Its behavior is FORAGE-AND-EVADE:
-// collect as many pellets as possible AND survive until turn 30 — i.e. seek
-// nearby pellets while keeping distance from the ghosts. (The ghosts are the
-// ones that learn; Pac-Man just plays this fixed forage-and-evade policy.)
+// Fixed start positions, reset at the start of every round.
+const START = {
+  pacman: { r: 5, c: 4 },
+  ghosts: [ { r: 1, c: 1 }, { r: 1, c: 8 }, { r: 8, c: 1 }, { r: 8, c: 8 } ],
+};
+// Pac-Man policy: FORAGE-AND-EVADE — seek nearby pellets while keeping distance
+// from the nearest ghost (not pure random). Weighted: maximise
+// A*min(ghostDist, CAP) - B*pelletDist over candidate cells.
+const FLEE = { A: 2, B: 1, CAP: 4 };
 
-// 10x10 mock maze (1=wall, 0=floor). Looks mazey; layout only, no logic.
+// 10x10 maze (1=wall, 0=floor).
 const MAZE = [
   [1,1,1,1,1,1,1,1,1,1],
   [1,0,0,0,1,0,0,0,0,1],
@@ -610,20 +614,23 @@ const ACTORS = [
   { label: "Delaware's Turn", color: "var(--delaware)" },
 ];
 
-// ---- display-only scoring config ----------------------------------------
-const START_SCORE = 120;
+// ---- scoring config -----------------------------------------------------
+const START_SCORE = 120;     // -1 per ghost move; 4 ghosts * 30 turns = 120
 const MAX_TURN = 30;
 
-// ---- session state (mock) -----------------------------------------------
+// ---- session/game state -------------------------------------------------
 const game = {
   apiKey: "",
   rounds: 3,
   round: 1,
   turn: 1,
   score: START_SCORE,
-  actor: 0,             // index into ACTORS
-  activeGhost: "atlanta", // which ghost the TOP memory panel shows
+  actor: 0,               // index into ACTORS — whose turn it is to move next
+  activeGhost: "pacman",  // which actor the TOP memory panel shows
+  status: "playing",      // playing | over
+  pellets: new Set(),     // "r,c" floor cells with a pellet
 };
+let history = [];          // snapshots for the "<<" rewind
 
 // ===================================================================
 // Screen navigation
@@ -662,22 +669,93 @@ document.getElementById("playBtn").addEventListener("click", () => {
   showScreen("game");
 });
 
-// Result screen
+// Result screen: advance to the next round in the series, or restart at round 1.
 document.getElementById("againBtn").addEventListener("click", () => {
-  startGame();
+  if (game.round < game.rounds) startRound(game.round + 1);
+  else startRound(1);
   showScreen("game");
 });
 
 // ===================================================================
-// Game screen
+// Geometry helpers
 // ===================================================================
-function startGame() {
-  game.round = 1;
+const keyOf = (r, c) => `${r},${c}`;
+const samePos = (a, b) => a.r === b.r && a.c === b.c;
+const isFloor = (r, c) => r >= 0 && r < SIZE && c >= 0 && c < SIZE && MAZE[r][c] === 0;
+function moveOptions(pos, includeStay) {
+  const opts = includeStay ? [{ r: pos.r, c: pos.c }] : [];
+  for (const [dr, dc] of [[-1,0],[1,0],[0,-1],[0,1]]) {
+    const r = pos.r + dr, c = pos.c + dc;
+    if (isFloor(r, c)) opts.push({ r, c });
+  }
+  return opts;
+}
+function pickRandom(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
+// Wall-aware BFS distance map from one or more source cells.
+function bfsDist(sources) {
+  const dist = new Map(), q = [];
+  for (const s of sources) { dist.set(keyOf(s.r, s.c), 0); q.push(s); }
+  while (q.length) {
+    const cur = q.shift(), d = dist.get(keyOf(cur.r, cur.c));
+    for (const nb of moveOptions(cur, false)) {
+      const k = keyOf(nb.r, nb.c);
+      if (!dist.has(k)) { dist.set(k, d + 1); q.push(nb); }
+    }
+  }
+  return dist;
+}
+const distAt = (m, cell) => m.get(keyOf(cell.r, cell.c)) ?? Infinity;
+
+// ===================================================================
+// Agents
+// ===================================================================
+// Pac-Man: forage-and-evade — pick the reachable cell (or stay) maximising
+// A*min(ghostDist, CAP) - B*pelletDist; eats a pellet on landing.
+function pacmanMove() {
+  const options = moveOptions(PACMAN.pos, true);
+  const ghostMaps = GHOSTS.map(g => bfsDist([g.pos]));
+  const pelletMap = game.pellets.size
+    ? bfsDist([...game.pellets].map(k => { const [r, c] = k.split(",").map(Number); return { r, c }; }))
+    : null;
+  let best = -Infinity, bucket = [];
+  for (const cell of options) {
+    const gd = Math.min(...ghostMaps.map(m => distAt(m, cell)));
+    const pd = pelletMap ? distAt(pelletMap, cell) : 0;
+    const s = FLEE.A * Math.min(gd, FLEE.CAP) - FLEE.B * pd;
+    if (s > best) { best = s; bucket = [cell]; }
+    else if (s === best) bucket.push(cell);
+  }
+  PACMAN.pos = pickRandom(bucket);
+  game.pellets.delete(keyOf(PACMAN.pos.r, PACMAN.pos.c));   // forage
+}
+// Ghost: random legal move (Grok-driven in 2-2).
+function ghostMoveRandom(g) {
+  const opts = moveOptions(g.pos, false);
+  if (opts.length) g.pos = pickRandom(opts);
+}
+const caught = () => GHOSTS.some(g => samePos(g.pos, PACMAN.pos));
+
+// ===================================================================
+// Round / turn flow
+// ===================================================================
+function startGame() {                 // begin a fresh series at round 1
+  startRound(1);
+}
+function startRound(roundNum) {
+  game.round = roundNum;
   game.turn = 1;
   game.score = START_SCORE;
   game.actor = 0;
   game.activeGhost = "pacman";
-  setPlaying(false);          // ensure auto-advance is stopped on (re)start
+  game.status = "playing";
+  PACMAN.pos = { ...START.pacman };
+  GHOSTS.forEach((g, i) => { g.pos = { ...START.ghosts[i] }; });
+  game.pellets = new Set();
+  for (let r = 0; r < SIZE; r++)
+    for (let c = 0; c < SIZE; c++)
+      if (isFloor(r, c) && !occupied(r, c)) game.pellets.add(keyOf(r, c));
+  history = [];
+  setPlaying(false);
   buildBoard();
   renderTeamMem();
   renderGame();
@@ -700,43 +778,60 @@ function renderGame() {
   drawTextBoard();
 }
 
+// Snapshot/restore for the "<<" rewind.
+function snapshot() {
+  return {
+    pacman: { ...PACMAN.pos },
+    ghosts: GHOSTS.map(g => ({ ...g.pos })),
+    pellets: [...game.pellets],
+    turn: game.turn, score: game.score, actor: game.actor, status: game.status,
+  };
+}
+function restore(s) {
+  PACMAN.pos = { ...s.pacman };
+  GHOSTS.forEach((g, i) => { g.pos = { ...s.ghosts[i] }; });
+  game.pellets = new Set(s.pellets);
+  game.turn = s.turn; game.score = s.score; game.actor = s.actor; game.status = s.status;
+}
+
 // ---- transport controls: << (back), Play/Pause, >> (forward) ------------
-// Forward: advance to the next actor. Ghost moves cost -1 each; finishing the
-// four ghosts advances the turn. At turn 30 with no catch -> lose (display only).
+// Forward = one SUB-TURN: the current actor moves, then the pointer advances.
 function stepForward() {
-  game.actor = (game.actor + 1) % ACTORS.length;
-  if (game.actor !== 0) {
-    game.score = Math.max(0, game.score - 1);   // a ghost just moved
+  if (game.status !== "playing") return;
+  history.push(snapshot());
+
+  const i = game.actor;
+  if (i === 0) {
+    pacmanMove();
   } else {
-    game.turn += 1;                             // wrapped back to Pac-Man
-    if (game.turn > MAX_TURN) {
-      game.score = 0;
-      setPlaying(false);
-      return endRound(false);                   // out of turns -> lose
-    }
+    ghostMoveRandom(GHOSTS[i - 1]);
+    game.score = Math.max(0, game.score - 1);     // each ghost move costs -1
+  }
+
+  if (caught()) { endGame(true); return; }        // a ghost (or Pac-Man) collided
+
+  if (i === ACTORS.length - 1) {                   // Delaware finished the turn
+    game.actor = 0;
+    game.turn += 1;
+    if (game.turn > MAX_TURN) { game.score = 0; endGame(false); return; }
+  } else {
+    game.actor = i + 1;
   }
   renderGame();
 }
 
-// Backward: undo exactly one forward step (down to the round start).
+// Backward = undo one sub-turn by restoring the last snapshot.
 function stepBackward() {
-  if (game.actor === 0 && game.turn === 1) return;   // already at the start
-  if (game.actor === 0) {
-    game.turn -= 1;
-    game.actor = ACTORS.length - 1;             // back to Delaware of prev turn
-  } else {
-    game.score = Math.min(START_SCORE, game.score + 1);
-    game.actor -= 1;
-  }
+  if (!history.length) return;
+  restore(history.pop());
   renderGame();
 }
 
-// Play / Pause toggle for auto-advancing through the mock turns.
 let playTimer = null;
 function setPlaying(on) {
   const btn = document.getElementById("playBtn2");
   if (on) {
-    if (!playTimer) playTimer = setInterval(stepForward, 600);
+    if (!playTimer) playTimer = setInterval(stepForward, 550);
     btn.innerHTML = "&#10073;&#10073; Pause";
   } else {
     if (playTimer) { clearInterval(playTimer); playTimer = null; }
@@ -748,14 +843,18 @@ document.getElementById("fwdBtn").addEventListener("click", () => { setPlaying(f
 document.getElementById("backBtn").addEventListener("click", () => { setPlaying(false); stepBackward(); });
 document.getElementById("playBtn2").addEventListener("click", () => setPlaying(!playTimer));
 
-
-function endRound(win) {
+function endGame(win) {
+  game.status = "over";
+  setPlaying(false);
+  renderGame();                                    // show the final board state
   const v = document.getElementById("resVerdict");
   v.textContent = win ? "VICTORY" : "DEFEAT";
   v.className = "verdict " + (win ? "win" : "lose");
   document.getElementById("resLine").textContent = win
-    ? `Round ${game.round} — score ${game.score}, caught in ${game.turn} turns`
-    : `Round ${game.round} — Pac-Man escaped after ${MAX_TURN} turns, score 0`;
+    ? `Round ${game.round} / ${game.rounds} — VICTORY · caught Pac-Man on turn ${game.turn} · score ${game.score}`
+    : `Round ${game.round} / ${game.rounds} — DEFEAT · Pac-Man survived ${MAX_TURN} turns · score 0`;
+  const again = document.getElementById("againBtn");
+  again.textContent = game.round < game.rounds ? "Next Round" : "Play Again";
   showScreen("result");
 }
 
@@ -773,14 +872,13 @@ function buildBoard() {
 }
 function drawEntities() {
   document.querySelectorAll(".cell").forEach(c => { c.innerHTML = ""; });
-  // a few mock pellets on floor cells
-  for (let r = 0; r < SIZE; r++)
-    for (let c = 0; c < SIZE; c++)
-      if (MAZE[r][c] === 0 && (r + c) % 3 === 0 && !occupied(r, c)) {
-        const cell = document.getElementById(`cell-${r}-${c}`);
-        const dot = document.createElement("div"); dot.className = "pellet";
-        cell.appendChild(dot);
-      }
+  // real pellets
+  for (const k of game.pellets) {
+    const cell = document.getElementById(`cell-${k.replace(",", "-")}`);
+    if (!cell) continue;
+    const dot = document.createElement("div"); dot.className = "pellet";
+    cell.appendChild(dot);
+  }
   GHOSTS.forEach(g => {
     const cell = document.getElementById(`cell-${g.pos.r}-${g.pos.c}`);
     const el = document.createElement("div");
