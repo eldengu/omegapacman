@@ -188,30 +188,50 @@
   }
   .boardctrls { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
 
-  /* memory panel */
+  /* memory panel: TOP (per-ghost, auto-switching) + BOTTOM (team, fixed) */
   #memorypane {
     flex: 1;
-    min-width: 280px;
+    min-width: 340px;
+    align-self: stretch;        /* match the board's height */
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .mempanel {
+    flex: 1;                    /* two equal halves */
+    min-height: 0;             /* allow inner box to scroll */
     background: var(--panel);
     border: 1px solid var(--edge);
     border-radius: 12px;
-    padding: 14px 16px;
+    padding: 12px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
   }
-  #memorypane h3 { margin: 2px 0 10px; font-size: 16px; }
-  .mem { margin-bottom: 12px; }
-  .mem .memhdr { display: flex; align-items: center; gap: 8px; font-size: 13px; margin-bottom: 4px; }
+  .memtop { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+  .memtop h3 { margin: 0; font-size: 16px; }
+  .memsub { color: var(--muted); font-weight: normal; font-size: 12px; }
+  .memtabs { display: flex; gap: 6px; flex-wrap: wrap; }
+  .memtab {
+    padding: 5px 11px; font-size: 12px; border-radius: 8px;
+    background: var(--panel-2); border: 1px solid var(--edge);
+    border-bottom: 3px solid transparent;
+  }
+  .memtab:hover { background: #26265c; }
+  .memtab.active { background: var(--floor); border-bottom-color: var(--accent); color: #fff; }
   .mdbox {
     margin: 0;
+    flex: 1;
+    min-height: 0;
     background: var(--floor);
     border: 1px solid var(--edge);
     border-radius: 8px;
-    padding: 8px 10px;
-    font-size: 11px;
-    line-height: 1.4;
+    padding: 12px 14px;
+    font-size: 13px;
+    line-height: 1.5;
     white-space: pre-wrap;
-    max-height: 90px;
     overflow: auto;
-    color: var(--muted);
+    color: var(--ink);
   }
 
   /* settings overlay */
@@ -304,14 +324,32 @@
         <div class="boardctrls">
           <button id="stepBtn" class="primary">Step</button>
           <button id="textToggle">Text view</button>
-          <button id="catchBtn">Simulate catch ▸ Result</button>
           <button id="quitBtn">Quit</button>
         </div>
       </div>
 
       <div id="memorypane">
-        <h3>Memory <span style="color:var(--muted);font-weight:normal;font-size:12px">(per-ghost + team SKILL.md)</span></h3>
-        <div id="memboxes"></div>
+        <!-- TOP: per-ghost .md, auto-follows the current actor -->
+        <div id="ghostMem" class="mempanel">
+          <div class="memtop">
+            <h3>Ghost memory</h3>
+            <div class="memtabs" id="ghostTabs">
+              <button class="memtab" data-ghost="atlanta"  style="--accent:var(--atlanta)">Atlanta</button>
+              <button class="memtab" data-ghost="berkeley" style="--accent:var(--berkeley)">Berkeley</button>
+              <button class="memtab" data-ghost="chicago"  style="--accent:var(--chicago)">Chicago</button>
+              <button class="memtab" data-ghost="delaware" style="--accent:var(--delaware)">Delaware</button>
+            </div>
+          </div>
+          <pre id="ghostMd" class="mdbox big"></pre>
+        </div>
+
+        <!-- BOTTOM: Team .md, always visible -->
+        <div id="teamMem" class="mempanel">
+          <div class="memtop">
+            <h3>Team memory <span class="memsub">(shared — always visible)</span></h3>
+          </div>
+          <pre id="teamMd" class="mdbox big"></pre>
+        </div>
       </div>
     </div>
   </section>
@@ -374,21 +412,60 @@ const MAZE = [
 ];
 const SIZE = 10;
 
-// Placeholder SKILL.md text for the Memory panel.
+// Placeholder SKILL.md text for the Memory panel (mock — many lines so the
+// large boxes look realistic).
 const MOCK_MEMORY = {
-  atlanta:  "# Atlanta\n# reason: starter — learn by chasing\nchase",
-  berkeley: "# Berkeley\n# reason: starter — explore for now\n(no directives yet)",
-  chicago:  "# Chicago\n# reason: starter — explore for now\n(no directives yet)",
-  delaware: "# Delaware\n# reason: starter — explore for now\n(no directives yet)",
-  team:     "# Team (shared)\n# reason: no shared plan yet\n(filled in as the ghosts learn)",
+  atlanta:
+    "# Atlanta — personal strategy\n" +
+    "# role: lead chaser\n" +
+    "# reason: I am closest at the start, so I pressure Pac-Man early\n" +
+    "#         and deny the top-left corridors.\n" +
+    "\n" +
+    "chase\n" +
+    "herd south\n" +
+    "\n" +
+    "# notes from last round:\n" +
+    "# - Pac-Man slipped past me near (1,4); cut that lane sooner.\n",
+  berkeley:
+    "# Berkeley — personal strategy\n" +
+    "# role: flanker\n" +
+    "# reason: approach from the opposite side of Atlanta to pincer.\n" +
+    "\n" +
+    "intercept\n" +
+    "support Atlanta\n" +
+    "\n" +
+    "# notes from last round:\n" +
+    "# - good cut-off at the east junction; keep it up.\n",
+  chicago:
+    "# Chicago — personal strategy\n" +
+    "# role: choke guard (north)\n" +
+    "# reason: Pac-Man keeps escaping into the north pocket.\n" +
+    "\n" +
+    "guard 1,5\n" +
+    "\n" +
+    "# notes from last round:\n" +
+    "# - held the choke once, then wandered. Stay put longer.\n",
+  delaware:
+    "# Delaware — personal strategy\n" +
+    "# role: choke guard (south)\n" +
+    "# reason: seal the escape behind Pac-Man as the team closes in.\n" +
+    "\n" +
+    "guard 8,5\n" +
+    "\n" +
+    "# notes from last round:\n" +
+    "# - arrived late; start moving toward the choke on turn 1.\n",
+  team:
+    "# Team — shared strategy\n" +
+    "# reason: surround, don't just chase. Two press, two seal the chokes,\n" +
+    "#         and herd Pac-Man into a dead-end pocket.\n" +
+    "\n" +
+    "herd north\n" +
+    "\n" +
+    "# coordination:\n" +
+    "# - Atlanta + Berkeley press from opposite sides.\n" +
+    "# - Chicago guards the north choke, Delaware the south.\n" +
+    "# - collapse together once Pac-Man is boxed in.\n",
 };
-const MEM_ORDER = [
-  { key: "atlanta",  name: "Atlanta",  color: "var(--atlanta)" },
-  { key: "berkeley", name: "Berkeley", color: "var(--berkeley)" },
-  { key: "chicago",  name: "Chicago",  color: "var(--chicago)" },
-  { key: "delaware", name: "Delaware", color: "var(--delaware)" },
-  { key: "team",     name: "Team",     color: "var(--ink)" },
-];
 
 // Turn cycle: Pac-Man, then the four ghosts.
 const ACTORS = [
@@ -410,7 +487,8 @@ const game = {
   round: 1,
   turn: 1,
   score: START_SCORE,
-  actor: 0,         // index into ACTORS
+  actor: 0,             // index into ACTORS
+  activeGhost: "atlanta", // which ghost the TOP memory panel shows
 };
 
 // ===================================================================
@@ -460,8 +538,9 @@ function startGame() {
   game.turn = 1;
   game.score = START_SCORE;
   game.actor = 0;
+  game.activeGhost = "atlanta";
   buildBoard();
-  renderMemory();
+  renderTeamMem();
   renderGame();
 }
 
@@ -473,6 +552,11 @@ function renderGame() {
   const label = document.getElementById("turnlabel");
   label.textContent = a.label;
   label.style.color = a.color;
+
+  // Top memory panel auto-follows the current actor when it's a ghost.
+  if (game.actor >= 1) game.activeGhost = GHOSTS[game.actor - 1].key;
+  renderGhostMem();
+
   drawEntities();
   drawTextBoard();
 }
@@ -493,7 +577,6 @@ document.getElementById("stepBtn").addEventListener("click", () => {
   renderGame();
 });
 
-document.getElementById("catchBtn").addEventListener("click", () => endRound(true));
 document.getElementById("quitBtn").addEventListener("click", () => showScreen("start"));
 
 function endRound(win) {
@@ -568,22 +651,21 @@ document.getElementById("textToggle").addEventListener("click", () => {
   document.getElementById("textToggle").textContent = showText ? "Board view" : "Text view";
 });
 
-// ---- memory panel -------------------------------------------------------
-function renderMemory() {
-  const wrap = document.getElementById("memboxes");
-  wrap.innerHTML = "";
-  for (const m of MEM_ORDER) {
-    const div = document.createElement("div");
-    div.className = "mem";
-    div.innerHTML =
-      `<div class="memhdr"><span class="dot" style="background:${m.color}"></span><b>${m.name}</b></div>`;
-    const pre = document.createElement("pre");
-    pre.className = "mdbox";
-    pre.textContent = MOCK_MEMORY[m.key];
-    div.appendChild(pre);
-    wrap.appendChild(div);
-  }
+// ---- memory panel: TOP (per-ghost, auto-following) + BOTTOM (team) -------
+function renderGhostMem() {
+  document.getElementById("ghostMd").textContent = MOCK_MEMORY[game.activeGhost];
+  document.querySelectorAll("#ghostTabs .memtab").forEach(t =>
+    t.classList.toggle("active", t.dataset.ghost === game.activeGhost));
 }
+function renderTeamMem() {
+  document.getElementById("teamMd").textContent = MOCK_MEMORY.team;
+}
+// Tabs can also be clicked manually (still auto-follows the actor on Step).
+document.querySelectorAll("#ghostTabs .memtab").forEach(tab =>
+  tab.addEventListener("click", () => {
+    game.activeGhost = tab.dataset.ghost;
+    renderGhostMem();
+  }));
 
 // ---- settings overlay ---------------------------------------------------
 function syncKeyFields() {
