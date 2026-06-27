@@ -970,87 +970,57 @@ function buildReflexionPrompt(summary) {
     "- Comment lines start with '#'. Directives are plain lines (no '#').",
     "",
     "OUTPUT FORMAT — follow EXACTLY:",
-    "- Return ONLY a single valid JSON object. No markdown, no code fences, no prose",
-    "  before or after it, and NO comments inside the JSON itself.",
-    "- Exactly these five string keys: ghost_a, ghost_b, ghost_c, ghost_d, team.",
-    "- The ENTIRE .md content for each file — including the '#' comment/reason lines —",
-    "  goes INSIDE that key's string value.",
-    "- Escape properly: newlines inside a value as \\n, and any double quote as \\\".",
-    "- Use double quotes for all keys and strings. No trailing commas. No single quotes.",
+    "- Do NOT use JSON. Do NOT use markdown or code fences.",
+    "- Return the five files as delimited blocks, each introduced by a line that is",
+    "  exactly the delimiter, then the raw file content (multiple lines allowed,",
+    "  including '#' comment/reason lines), then the next delimiter. Finish with",
+    "  the ===END=== line. Put nothing else before or after.",
+    "- Use these delimiter lines exactly, in this order:",
     "",
-    'Example shape (content abbreviated): {"ghost_a":"# reason: ...\\nchase","ghost_b":"...","ghost_c":"...","ghost_d":"...","team":"..."}',
+    "===GHOST_A===",
+    "# reason: <why>",
+    "<directives, one per line>",
+    "===GHOST_B===",
+    "<...>",
+    "===GHOST_C===",
+    "<...>",
+    "===GHOST_D===",
+    "<...>",
+    "===TEAM===",
+    "<...>",
+    "===END===",
   ].join("\n");
 }
 
 const SKILL_KEYS = ["ghost_a", "ghost_b", "ghost_c", "ghost_d", "team"];
+// Map delimiter label -> SKILLS key. Labels are matched case-insensitively.
+const BLOCK_LABELS = { GHOST_A: "ghost_a", GHOST_B: "ghost_b", GHOST_C: "ghost_c", GHOST_D: "ghost_d", TEAM: "team" };
 
-function validateSkills(obj) {
-  const out = {};
-  for (const k of SKILL_KEYS) {
-    if (typeof obj[k] !== "string") throw new Error("missing string value for " + k);
-    out[k] = obj[k];
-  }
-  return out;
-}
-
-// Strip markdown fences / surrounding prose and keep just the outer { ... }.
-function extractJsonObject(text) {
-  let t = (text || "").replace(/```(?:json)?/gi, "").trim();
-  const a = t.indexOf("{"), b = t.lastIndexOf("}");
-  if (a !== -1 && b !== -1 && b > a) t = t.slice(a, b + 1);
-  return t;
-}
-
-// Common LLM JSON quirks: smart quotes, // and /* */ comments, trailing commas.
-function lenientRepairs(t) {
-  return t
-    .replace(/[“”]/g, '"').replace(/[‘’]/g, "'")
-    .replace(/\/\/[^\n\r]*/g, "")
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .replace(/,(\s*[}\]])/g, "$1");
-}
-
-// Read a quoted string starting at an opening-quote index, decoding escapes and
-// tolerating raw (unescaped) newlines inside the value. Returns {value,end}.
-function readQuotedString(text, openIdx, quote) {
-  const ESC = { n: "\n", t: "\t", r: "\r", '"': '"', "'": "'", "\\": "\\", "/": "/", b: "\b", f: "\f" };
-  let out = "", i = openIdx + 1;
-  while (i < text.length) {
-    const ch = text[i];
-    if (ch === "\\") {
-      const n = text[i + 1];
-      out += (n in ESC) ? ESC[n] : n;           // decode known escapes, else keep
-      i += 2; continue;
-    }
-    if (ch === quote) return { value: out, end: i };
-    out += ch; i += 1;                            // literal char (incl. raw newline)
-  }
-  return null;                                    // unterminated
-}
-
-// Last-resort tolerant extraction: pull each known key's string value directly,
-// ignoring structural commas/comments entirely. Survives unescaped newlines,
-// trailing commas, single quotes, and stray prose between fields.
-function extractByKeys(raw) {
-  const out = {};
-  for (const k of SKILL_KEYS) {
-    const m = raw.match(new RegExp('["\']?' + k + '["\']?\\s*:\\s*(["\'])'));
-    if (!m) throw new Error("could not locate key " + k);
-    const openIdx = m.index + m[0].length - 1;    // index of the opening quote
-    const res = readQuotedString(raw, openIdx, m[1]);
-    if (!res) throw new Error("unterminated string for " + k);
-    out[k] = res.value;
-  }
-  return out;
-}
-
-// Robust parse: strict JSON, then lenient repairs, then per-key extraction.
-// Throws (with the underlying reason) only if all three fail.
+// Parse the delimited block format Gemini returns:
+//   ===GHOST_A===\n<content>\n===GHOST_B===\n...===TEAM===\n...===END===
+// Splitting on the ===NAME=== delimiter lines naturally tolerates multi-line
+// content, '#' comments, quotes, and commas with no escaping at all.
 function parseSkillUpdate(text) {
-  const body = extractJsonObject(text);
-  try { return validateSkills(JSON.parse(body)); } catch (_) {}
-  try { return validateSkills(JSON.parse(lenientRepairs(body))); } catch (_) {}
-  return validateSkills(extractByKeys(body));     // tolerant fallback
+  const raw = (text || "").replace(/```[a-z]*\n?/gi, "");   // drop any stray fences
+  // Match each "===LABEL===" delimiter line and capture label + position.
+  const re = /^[ \t]*={2,}\s*([A-Za-z_]+)\s*={2,}[ \t]*$/gm;
+  const marks = [];
+  let m;
+  while ((m = re.exec(raw)) !== null) {
+    marks.push({ label: m[1].toUpperCase(), start: m.index, contentStart: re.lastIndex });
+  }
+  const out = {};
+  for (let i = 0; i < marks.length; i++) {
+    const { label, contentStart } = marks[i];
+    if (label === "END") continue;
+    const key = BLOCK_LABELS[label];
+    if (!key) continue;                                     // unknown label -> ignore
+    const next = marks[i + 1] ? marks[i + 1].start : raw.length;
+    out[key] = raw.slice(contentStart, next).replace(/^\n/, "").replace(/\s+$/, "");
+  }
+  const missing = SKILL_KEYS.filter(k => typeof out[k] !== "string");
+  if (missing.length) throw new Error("missing block(s): " + missing.join(", "));
+  return out;
 }
 
 let LEARN_ROUNDS = [];          // [{ round, catchRate, avgTurns }]
@@ -1111,7 +1081,7 @@ async function learn(rounds) {
 
       let raw;
       try {
-        raw = await callGeminiRaw(apiKeyStr, buildReflexionPrompt(LAST_SUMMARY), 2048, true);
+        raw = await callGeminiRaw(apiKeyStr, buildReflexionPrompt(LAST_SUMMARY), 2048, false);
       } catch (e) {
         learnLog(`Round ${roundNo}: Gemini call failed — ${e.message}. Skipping round.`);
         setStatus(`Round ${roundNo}: Gemini call failed (${e.message}); round skipped.`);
@@ -1123,9 +1093,9 @@ async function learn(rounds) {
         updated = parseSkillUpdate(raw);
       } catch (e) {
         // Parsing failed even after repairs — show the RAW response and skip.
-        learnLog(`Round ${roundNo}: could not parse Gemini JSON — ${e.message}. Raw response below:`);
+        learnLog(`Round ${roundNo}: could not parse Gemini blocks — ${e.message}. Raw response below:`);
         learnLog(raw);
-        setStatus(`Round ${roundNo}: unparseable JSON from Gemini; round skipped (see learning log).`);
+        setStatus(`Round ${roundNo}: unparseable response from Gemini; round skipped (see learning log).`);
         continue;
       }
 
