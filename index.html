@@ -422,8 +422,10 @@
         <div id="board"></div>
         <pre id="textboard" class="hidden"></pre>
         <div class="boardctrls">
-          <button id="stepBtn" class="primary">Step</button>
-          <button id="textToggle">Text view</button>
+          <button id="backBtn" title="Step backward one turn">&laquo;</button>
+          <button id="playBtn2" class="primary" title="Play / Pause auto-advance">&#9654; Play</button>
+          <button id="fwdBtn" title="Step forward one turn">&raquo;</button>
+          <button id="textToggle" title="Switch board / text view">Text view</button>
         </div>
       </div>
 
@@ -675,6 +677,7 @@ function startGame() {
   game.score = START_SCORE;
   game.actor = 0;
   game.activeGhost = "pacman";
+  setPlaying(false);          // ensure auto-advance is stopped on (re)start
   buildBoard();
   renderTeamMem();
   renderGame();
@@ -697,9 +700,10 @@ function renderGame() {
   drawTextBoard();
 }
 
-// Step: advance to the next actor. Ghost moves cost -1 each; finishing the
+// ---- transport controls: << (back), Play/Pause, >> (forward) ------------
+// Forward: advance to the next actor. Ghost moves cost -1 each; finishing the
 // four ghosts advances the turn. At turn 30 with no catch -> lose (display only).
-document.getElementById("stepBtn").addEventListener("click", () => {
+function stepForward() {
   game.actor = (game.actor + 1) % ACTORS.length;
   if (game.actor !== 0) {
     game.score = Math.max(0, game.score - 1);   // a ghost just moved
@@ -707,11 +711,42 @@ document.getElementById("stepBtn").addEventListener("click", () => {
     game.turn += 1;                             // wrapped back to Pac-Man
     if (game.turn > MAX_TURN) {
       game.score = 0;
+      setPlaying(false);
       return endRound(false);                   // out of turns -> lose
     }
   }
   renderGame();
-});
+}
+
+// Backward: undo exactly one forward step (down to the round start).
+function stepBackward() {
+  if (game.actor === 0 && game.turn === 1) return;   // already at the start
+  if (game.actor === 0) {
+    game.turn -= 1;
+    game.actor = ACTORS.length - 1;             // back to Delaware of prev turn
+  } else {
+    game.score = Math.min(START_SCORE, game.score + 1);
+    game.actor -= 1;
+  }
+  renderGame();
+}
+
+// Play / Pause toggle for auto-advancing through the mock turns.
+let playTimer = null;
+function setPlaying(on) {
+  const btn = document.getElementById("playBtn2");
+  if (on) {
+    if (!playTimer) playTimer = setInterval(stepForward, 600);
+    btn.innerHTML = "&#10073;&#10073; Pause";
+  } else {
+    if (playTimer) { clearInterval(playTimer); playTimer = null; }
+    btn.innerHTML = "&#9654; Play";
+  }
+}
+
+document.getElementById("fwdBtn").addEventListener("click", () => { setPlaying(false); stepForward(); });
+document.getElementById("backBtn").addEventListener("click", () => { setPlaying(false); stepBackward(); });
+document.getElementById("playBtn2").addEventListener("click", () => setPlaying(!playTimer));
 
 
 function endRound(win) {
@@ -859,6 +894,7 @@ document.getElementById("menuApiKey").addEventListener("click", () => {
 });
 document.getElementById("menuQuit").addEventListener("click", () => {
   show("settingsMenu", false);
+  setPlaying(false);
   showScreen("start");
 });
 
