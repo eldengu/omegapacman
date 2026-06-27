@@ -99,6 +99,43 @@
   .chip { display: inline-flex; align-items: center; gap: 6px; }
   .dot { width: 12px; height: 12px; border-radius: 50%; display: inline-block; }
 
+  /* ===================== ARCADE ATTRACT (start) ===================== */
+  #screen-start.attract { background: #000; justify-content: center; }
+  .attract-inner { display: flex; flex-direction: column; align-items: center; gap: 26px; text-align: center; }
+  .omega-title { display: flex; flex-direction: column; align-items: center; line-height: 0.95; font-weight: 900; letter-spacing: 10px; }
+  .omega-word { font-size: 64px; }
+  .omega-title .omega-word:first-child { color: var(--chicago); text-shadow: 0 0 22px rgba(54,224,224,0.5); }
+  .omega-pac { color: var(--accent); text-shadow: 0 0 24px rgba(255,224,0,0.45); display: inline-flex; align-items: center; }
+  .pacchar {
+    display: inline-block; width: 0.78em; height: 0.78em; margin: 0 0.02em; border-radius: 50%;
+    background: var(--accent); transform: translateY(0.06em);
+    clip-path: polygon(100% 35%, 45% 50%, 100% 65%, 100% 0, 0 0, 0 100%, 100% 100%);
+    animation: chompmouth 0.5s steps(1) infinite;
+  }
+  @keyframes chompmouth { 50% { clip-path: circle(50% at 50% 50%); } }
+
+  .attract-row { display: flex; gap: 22px; align-items: center; margin-top: 4px; }
+  .chomp {
+    width: 46px; height: 46px; border-radius: 50%; background: var(--accent);
+    clip-path: polygon(100% 35%, 50% 50%, 100% 65%, 100% 0, 0 0, 0 100%, 100% 100%);
+    animation: chompmouth 0.4s steps(1) infinite;
+  }
+  .aghost {
+    width: 46px; height: 46px; border-radius: 50% 50% 20% 20%;
+    background: var(--g); position: relative; animation: bob 1.2s ease-in-out infinite;
+  }
+  .aghost:nth-child(3) { animation-delay: .15s; }
+  .aghost:nth-child(4) { animation-delay: .30s; }
+  .aghost:nth-child(5) { animation-delay: .45s; }
+  .aghost::before, .aghost::after { content: ""; position: absolute; top: 30%; width: 24%; height: 28%; background: #fff; border-radius: 50%; }
+  .aghost::before { left: 16%; } .aghost::after { right: 16%; }
+  @keyframes bob { 50% { transform: translateY(-6px); } }
+
+  .attract-sub { color: var(--muted); font-size: 14px; margin: 0; }
+  .press-key { font-size: 22px; letter-spacing: 4px; color: #fff; animation: blink 1s steps(1) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  .attract-foot { color: #55598c; font-size: 11px; margin-top: 18px; }
+
   /* ===================== GAME SCREEN ===================== */
   #screen-game { padding: 18px 22px; }
   #gametop {
@@ -254,23 +291,28 @@
 </head>
 <body>
 
-  <!-- ============ SCREEN 1: START ============ -->
-  <section id="screen-start" class="screen active">
-    <h1 class="title">OmegaPacman</h1>
-    <p class="tagline">A turn-based grid chase where four ghost agents — Atlanta, Berkeley, Chicago, Delaware — learn to cooperate and catch Pac-Man. Nobody codes the teamwork; it emerges.</p>
-    <div class="card">
-      <h2>Main Menu</h2>
-      <div class="row">
-        <button class="primary" data-go="apikey">New Game</button>
-        <button id="exitBtn">Exit</button>
+  <!-- ============ SCREEN 1: START (arcade attract) ============ -->
+  <section id="screen-start" class="screen active attract">
+    <div class="attract-inner">
+      <div class="omega-title" aria-label="OmegaPacman">
+        <span class="omega-word">OMEGA</span>
+        <span class="omega-word omega-pac">
+          P<span class="pacchar" aria-hidden="true"></span>CMAN
+        </span>
       </div>
-      <div class="legend">
-        <span class="chip"><span class="dot" style="background:var(--pac)"></span>Pac-Man</span>
-        <span class="chip"><span class="dot" style="background:var(--atlanta)"></span>Atlanta</span>
-        <span class="chip"><span class="dot" style="background:var(--berkeley)"></span>Berkeley</span>
-        <span class="chip"><span class="dot" style="background:var(--chicago)"></span>Chicago</span>
-        <span class="chip"><span class="dot" style="background:var(--delaware)"></span>Delaware</span>
+
+      <!-- our own simple shapes: one chomper + four ghosts, trademark-safe -->
+      <div class="attract-row" aria-hidden="true">
+        <div class="chomp"></div>
+        <div class="aghost" style="--g:var(--atlanta)"></div>
+        <div class="aghost" style="--g:var(--berkeley)"></div>
+        <div class="aghost" style="--g:var(--chicago)"></div>
+        <div class="aghost" style="--g:var(--delaware)"></div>
       </div>
+
+      <p class="attract-sub">four ghost agents learn to cooperate — the teamwork emerges</p>
+      <div class="press-key">PRESS ANY KEY</div>
+      <div class="attract-foot">original artwork — not affiliated with or endorsed by PAC-MAN&trade;</div>
     </div>
   </section>
 
@@ -515,13 +557,17 @@ function showScreen(name) {
 document.querySelectorAll("[data-go]").forEach(btn =>
   btn.addEventListener("click", () => showScreen(btn.dataset.go)));
 
-// Start screen
-document.getElementById("exitBtn").addEventListener("click", () => {
-  document.body.innerHTML =
-    '<div style="min-height:100vh;display:flex;align-items:center;justify-content:center;' +
-    'color:#ffe000;font-family:ui-monospace,monospace;font-size:24px;letter-spacing:2px;">' +
-    '👋 Thanks for playing OmegaPacman</div>';
+// Start screen — arcade attract: any key or click advances to the API key flow.
+function startActive() {
+  return document.getElementById("screen-start").classList.contains("active");
+}
+function leaveAttract() {
+  if (startActive()) showScreen("apikey");
+}
+document.addEventListener("keydown", e => {
+  if (startActive()) { e.preventDefault(); leaveAttract(); }
 });
+document.getElementById("screen-start").addEventListener("click", leaveAttract);
 
 // API key screen
 document.getElementById("apikeyNext").addEventListener("click", () => {
