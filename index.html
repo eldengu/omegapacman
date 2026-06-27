@@ -17,6 +17,7 @@
     --wall-edge: #7d96ff;
     --floor: #05051a;
     --cell: 40px;
+    --membox-h: 170px;   /* fixed memory-box height so tabs don't resize the panel */
     /* entity colors */
     --pac: #ffe000;
     --atlanta: #ff4d4d;
@@ -225,18 +226,16 @@
   }
   .boardctrls { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
 
-  /* memory panel: TOP (per-ghost, auto-switching) + BOTTOM (team, fixed) */
+  /* memory panel: TOP (per-actor, auto-switching) + BOTTOM (team, fixed) */
   #memorypane {
     flex: 1;
     min-width: 340px;
-    align-self: stretch;        /* match the board's height */
+    align-self: flex-start;     /* size to content; boxes have a fixed height */
     display: flex;
     flex-direction: column;
     gap: 14px;
   }
   .mempanel {
-    flex: 1;                    /* two equal halves */
-    min-height: 0;             /* allow inner box to scroll */
     background: var(--panel);
     border: 1px solid var(--edge);
     border-radius: 12px;
@@ -258,8 +257,7 @@
   .memtab.active { background: var(--floor); border-bottom-color: var(--accent); color: #fff; }
   .mdbox {
     margin: 0;
-    flex: 1;
-    min-height: 0;
+    height: var(--membox-h);   /* fixed height — content scrolls inside */
     background: var(--floor);
     border: 1px solid var(--edge);
     border-radius: 8px;
@@ -270,10 +268,9 @@
     overflow: auto;
     color: var(--ink);
   }
-  /* Pac-Man has no .md — show a big "?" instead */
+  /* Pac-Man has no .md — show a big "?" instead (same fixed height) */
   .nomem {
-    flex: 1;
-    min-height: 0;
+    height: var(--membox-h);
     background: var(--floor);
     border: 1px solid var(--edge);
     border-radius: 8px;
@@ -285,6 +282,9 @@
     text-align: center;
     padding: 12px;
   }
+  /* clickable boxes open a full-content popup */
+  .clickbox { cursor: pointer; transition: border-color .12s; }
+  .clickbox:hover { border-color: var(--wall-edge); }
   .nomem .qmark { font-size: 72px; font-weight: 900; color: var(--pac); text-shadow: 0 0 18px rgba(255,224,0,0.35); line-height: 1; }
   .nomem .nomem-cap { color: var(--muted); font-size: 13px; max-width: 260px; }
 
@@ -298,6 +298,22 @@
   .overlay .card { margin-top: 0; }
   .menucol { display: flex; flex-direction: column; gap: 12px; min-width: 220px; }
   .menucol button { width: 100%; }
+  /* full-content memory popup */
+  #mdModal .card { width: 680px; max-width: 92vw; align-items: stretch; }
+  #mdModal h2 { text-align: left; }
+  .mdmodal-body {
+    background: var(--floor);
+    border: 1px solid var(--edge);
+    border-radius: 8px;
+    padding: 16px 18px;
+    font-size: 14px;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    overflow: auto;
+    max-height: 60vh;
+    color: var(--ink);
+    text-align: left;
+  }
 
   /* result */
   .verdict { font-size: 40px; font-weight: bold; letter-spacing: 3px; }
@@ -401,8 +417,8 @@
               <button class="memtab" data-ghost="delaware" style="--accent:var(--delaware)">Delaware</button>
             </div>
           </div>
-          <pre id="ghostMd" class="mdbox big"></pre>
-          <div id="pacNoMem" class="nomem hidden">
+          <pre id="ghostMd" class="mdbox clickbox" title="Click to read the full strategy"></pre>
+          <div id="pacNoMem" class="nomem clickbox hidden" title="Click for details">
             <div class="qmark">?</div>
             <div class="nomem-cap">Pac-Man moves randomly — no memory, no strategy.</div>
           </div>
@@ -413,7 +429,7 @@
           <div class="memtop">
             <h3>Team memory <span class="memsub">(shared — always visible)</span></h3>
           </div>
-          <pre id="teamMd" class="mdbox big"></pre>
+          <pre id="teamMd" class="mdbox clickbox" title="Click to read the full strategy"></pre>
         </div>
       </div>
     </div>
@@ -439,6 +455,17 @@
       <div class="menucol">
         <button class="primary" id="menuApiKey">API Key</button>
         <button id="menuQuit">Quit</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ FULL MEMORY POPUP ============ -->
+  <div id="mdModal" class="overlay hidden">
+    <div class="card">
+      <h2 id="mdModalTitle">Memory</h2>
+      <pre id="mdModalBody" class="mdmodal-body"></pre>
+      <div class="row">
+        <button class="primary" id="mdModalClose">Close</button>
       </div>
     </div>
   </div>
@@ -473,6 +500,11 @@ const GHOSTS = [
   { key: "delaware", name: "Delaware", color: "var(--delaware)", pos: { r: 8, c: 8 } },
 ];
 const PACMAN = { pos: { r: 5, c: 4 } };
+// NOTE for STEP 2 (real game logic — not implemented in this UI mockup):
+// Pac-Man should NOT move purely at random. Its behavior is FORAGE-AND-EVADE:
+// collect as many pellets as possible AND survive until turn 30 — i.e. seek
+// nearby pellets while keeping distance from the ghosts. (The ghosts are the
+// ones that learn; Pac-Man just plays this fixed forage-and-evade policy.)
 
 // 10x10 mock maze (1=wall, 0=floor). Looks mazey; layout only, no logic.
 const MAZE = [
@@ -751,6 +783,30 @@ document.querySelectorAll("#ghostTabs .memtab").forEach(tab =>
     renderGhostMem();
   }));
 
+// ---- full-content memory popup ------------------------------------------
+const PAC_NO_MEM_TEXT =
+  "Pac-Man moves randomly — no memory, no strategy.\n\n" +
+  "Pac-Man has no SKILL.md because it does not learn. Only the four ghosts " +
+  "(Atlanta, Berkeley, Chicago, Delaware) keep strategy files and improve them " +
+  "between rounds.";
+const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
+
+function openMdModal(title, body) {
+  document.getElementById("mdModalTitle").textContent = title;
+  document.getElementById("mdModalBody").textContent = body;
+  document.getElementById("mdModal").classList.remove("hidden");
+}
+// Clicking the per-actor box opens the current actor's full content.
+function openActorMem() {
+  if (game.activeGhost === "pacman") openMdModal("Pacman", PAC_NO_MEM_TEXT);
+  else openMdModal(cap(game.activeGhost), MOCK_MEMORY[game.activeGhost]);
+}
+document.getElementById("ghostMd").addEventListener("click", openActorMem);
+document.getElementById("pacNoMem").addEventListener("click", openActorMem);
+document.getElementById("teamMd").addEventListener("click", () => openMdModal("Team", MOCK_MEMORY.team));
+document.getElementById("mdModalClose").addEventListener("click", () =>
+  document.getElementById("mdModal").classList.add("hidden"));
+
 // ---- settings menu + API key overlay ------------------------------------
 function syncKeyFields() {
   document.getElementById("apikeyInput").value = game.apiKey;
@@ -779,8 +835,8 @@ document.getElementById("settingsClose").addEventListener("click", () => {
 });
 document.getElementById("settingsCancel").addEventListener("click", () => show("settingsOverlay", false));
 
-// Click the dark backdrop (outside the card) to dismiss either overlay.
-["settingsMenu", "settingsOverlay"].forEach(id => {
+// Click the dark backdrop (outside the card) to dismiss any overlay.
+["settingsMenu", "settingsOverlay", "mdModal"].forEach(id => {
   const ov = document.getElementById(id);
   ov.addEventListener("click", e => { if (e.target === ov) show(id, false); });
 });
