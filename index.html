@@ -17,6 +17,7 @@
     --wall-edge: #7d96ff;
     --floor: #05051a;
     --cell: 40px;
+    --board-size: calc(var(--cell) * 10 + 30px);  /* board outer box (cells + gaps + padding) */
     --membox-h: 170px;   /* fixed memory-box height so tabs don't resize the panel */
     /* entity colors */
     --pac: #ffe000;
@@ -179,6 +180,8 @@
   #boardpane { display: flex; flex-direction: column; gap: 12px; align-items: center; }
 
   #board {
+    width: var(--board-size);
+    height: var(--board-size);
     display: grid;
     grid-template-columns: repeat(10, var(--cell));
     grid-template-rows: repeat(10, var(--cell));
@@ -213,16 +216,36 @@
   }
   .ghost::before { left: 16%; } .ghost::after { right: 16%; }
 
+  /* Text view occupies the SAME box as the board (same size/position) */
   #textboard {
+    width: var(--board-size);
+    height: var(--board-size);
     margin: 0;
-    background: var(--floor);
-    border: 1px solid var(--edge);
+    background: #000;
     border-radius: 10px;
-    padding: 14px 18px;
-    font-size: 16px;
-    line-height: 1.35;
-    letter-spacing: 3px;
+    box-shadow: 0 0 0 2px var(--edge);
+    padding: 18px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    overflow: hidden;
+  }
+  .tb-grid {
+    margin: 0;
+    font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+    font-size: 20px;
+    line-height: 1.45;
+    text-align: left;
     color: var(--ink);
+  }
+  .tb-legend {
+    font-size: 11px;
+    line-height: 1.6;
+    color: var(--muted);
+    text-align: center;
+    max-width: 100%;
   }
   .boardctrls { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
 
@@ -746,14 +769,26 @@ function drawTextBoard() {
     if (g) return g.name[0];                 // A / B / C / D
     return MAZE[r][c] === 1 ? "#" : ".";
   };
-  let out = "    " + [...Array(SIZE).keys()].join(" ") + "\n";
+  // Header line: two leading spaces (for the row-label column) then 0..9.
+  const cols = [...Array(SIZE).keys()].join(" ");
+  let grid = "  " + cols + "\n";
   for (let r = 0; r < SIZE; r++) {
-    let line = (r + " ").padStart(3) + " ";
-    for (let c = 0; c < SIZE; c++) line += sym(r, c) + " ";
-    out += line.trimEnd() + "\n";
+    let line = r + " ";                       // 1-digit row label + space
+    for (let c = 0; c < SIZE; c++) line += sym(r, c) + (c < SIZE - 1 ? " " : "");
+    grid += line + "\n";
   }
-  out += "\nLegend: # wall  . floor  P Pac-Man  A Atlanta  B Berkeley  C Chicago  D Delaware";
-  document.getElementById("textboard").textContent = out;
+  const legend = "# wall   . floor   P Pac-Man   A Atlanta   B Berkeley   C Chicago   D Delaware";
+
+  const tb = document.getElementById("textboard");
+  tb.innerHTML = "";
+  const pre = document.createElement("pre");
+  pre.className = "tb-grid";
+  pre.textContent = grid.replace(/\n$/, "");
+  const leg = document.createElement("div");
+  leg.className = "tb-legend";
+  leg.textContent = legend;
+  tb.appendChild(pre);
+  tb.appendChild(leg);
 }
 document.getElementById("textToggle").addEventListener("click", () => {
   const b = document.getElementById("board");
