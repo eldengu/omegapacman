@@ -110,6 +110,26 @@
   #stats b { color: #36e0e0; }
   #status { font-size: 15px; min-height: 20px; font-weight: bold; }
   .controls { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+  #brainbar {
+    display: flex;
+    gap: 16px;
+    align-items: center;
+    flex-wrap: wrap;
+    justify-content: center;
+    font-size: 13px;
+  }
+  #brainbar label { display: flex; gap: 6px; align-items: center; }
+  #brainbar select, #brainbar input {
+    font: inherit;
+    font-size: 13px;
+    padding: 6px 8px;
+    background: #11112e;
+    color: var(--ink);
+    border: 1px solid #2a2a6a;
+    border-radius: 6px;
+  }
+  #brainbar input { width: 280px; max-width: 60vw; }
+  .note { opacity: 0.6; font-size: 12px; }
   button {
     font: inherit;
     padding: 8px 16px;
@@ -165,7 +185,7 @@
 </head>
 <body>
   <h1>OmegaPacman</h1>
-  <p class="sub">ghost-brains — ghosts decide via SKILL.md (local stub, no API yet)</p>
+  <p class="sub">ghost-brains — ghosts decide via SKILL.md (local stub or Gemini API)</p>
 
   <div id="board" aria-label="game grid"></div>
 
@@ -189,6 +209,20 @@
     <button id="new">New Game</button>
     <button id="batch">Run 200 games</button>
     <button id="resetstats">Reset Stats</button>
+  </div>
+
+  <div id="brainbar">
+    <label>Ghost brain:
+      <select id="mode">
+        <option value="stub">stub (local, no key)</option>
+        <option value="gemini">Gemini API</option>
+      </select>
+    </label>
+    <label>API key:
+      <input id="apikey" type="password" autocomplete="off" spellcheck="false"
+             placeholder="Gemini API key — stays in your browser" />
+    </label>
+    <span id="brainnote" class="note">Stub mode — no API calls.</span>
   </div>
 
   <details>
@@ -507,8 +541,102 @@ function decideGhostMove(st, i) {
 let LAST_CONTEXT = "";
 
 // ===================================================================
-// Turn engine. advance() is pure (no DOM) so it powers both the live game
-// and headless batch runs through the exact same logic.
+// Gemini brain. Sends the SAME decision context the stub uses and asks for
+// one legal move. The API key comes from a UI field (never hardcoded); if
+// the key is missing or a call fails/parses wrong, we fall back to the stub.
+// ===================================================================
+const GEMINI_MODEL = "gemini-3.5-flash";
+const GEMINI_URL = m =>
+  `https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent`;
+const DIRS = { up: [-1, 0], down: [1, 0], left: [0, -1], right: [0, 1] };
+let GEMINI_FALLBACKS = 0;   // count of turns where a ghost fell back to the stub
+
+const getMode = () => document.getElementById("mode").value;
+const getApiKey = () => document.getElementById("apikey").value.trim();
+const geminiActive = () => getMode() === "gemini" && !!getApiKey();
+
+async function callGemini(apiKeyStr, context) {
+  const prompt =
+    "You are ONE ghost in a turn-based Pac-Man chase on a 10x10 grid. Use the " +
+    "game state and your strategy notes to choose this ghost's single move.\n\n" +
+    context +
+    "\n\nReply with EXACTLY one word naming the direction to move, chosen from " +
+    "LEGAL MOVES (up, down, left, or right). Output only that word.";
+  const res = await fetch(GEMINI_URL(GEMINI_MODEL) + "?key=" + encodeURIComponent(apiKeyStr), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      contents: [{ parts: [{ text: prompt }] }],
+      generationConfig: { temperature: 0.7, maxOutputTokens: 64 },
+    }),
+  });
+  if (!res.ok) throw new Error("Gemini HTTP " + res.status);
+  const data = await res.json();
+  const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!text) throw new Error("Gemini: empty response");
+  return text;
+}
+
+// Map a direction word to a legal move cell, or null if invalid.
+function dirToMove(g, word, legal) {
+  const hit = ["up", "down", "left", "right"].find(d => (word || "").toLowerCase().includes(d));
+  if (!hit) return null;
+  const [dr, dc] = DIRS[hit];
+  const target = { r: g.r + dr, c: g.c + dc };
+  return legal.find(m => m.r === target.r && m.c === target.c) || null;
+}
+
+// Decide one ghost's move via Gemini, with one retry, falling back to the stub.
+async function geminiGhostMove(st, i, apiKeyStr) {
+  const g = st.ghosts[i];
+  const legal = moveOptions(g, false);
+  if (!legal.length) return { ...g };
+
+  const context = buildContext(st, i);
+  if (i === 0) LAST_CONTEXT = context;
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const word = await callGemini(apiKeyStr, context);
+      const move = dirToMove(g, word, legal);
+      if (move) return move;
+    } catch (_) { /* retry once, then fall through to the stub */ }
+  }
+  GEMINI_FALLBACKS += 1;
+  return decideGhostMove(st, i);
+}
+
+// Async turn: Pac-Man (local) then all 4 ghosts decided in PARALLEL via Gemini.
+async function advanceGemini(st, apiKeyStr) {
+  st.status = "playing";
+  st.turn += 1;
+
+  st.pacman = pacmanMove(st);
+  const k = key(st.pacman.r, st.pacman.c);
+  if (st.pellets.has(k)) { st.pellets.delete(k); st.pelletsEaten += 1; }
+  if (st.ghosts.some(g => same(g, st.pacman))) {
+    st.status = "caught"; st.score = st.turn; return "caught";
+  }
+  if (st.pellets.size === 0) { st.status = "cleared"; return "cleared"; }
+
+  // All four ghosts decide from the SAME pre-move snapshot, concurrently.
+  const moves = await Promise.all(
+    st.ghosts.map((_, i) => geminiGhostMove(st, i, apiKeyStr))
+  );
+  for (let i = 0; i < moves.length; i++) {
+    st.ghosts[i] = moves[i];
+    if (same(moves[i], st.pacman)) {
+      st.status = "caught"; st.score = st.turn; return "caught";
+    }
+  }
+
+  if (st.turn >= st.maxTurns) { st.status = "escaped"; return "escaped"; }
+  return null;
+}
+
+// ===================================================================
+// Turn engine. advance() is pure + synchronous (no DOM) so it powers the
+// headless batch and the stub live path through the exact same logic.
 // ===================================================================
 function advance(st) {
   st.status = "playing";
@@ -542,16 +670,21 @@ const ENDINGS = {
   cleared: st => `Board cleared in ${st.turn} turns — Pac-Man wins, ghosts lose.`,
 };
 
-function step() {
-  if (state.status !== "ready" && state.status !== "playing") return;
-  const term = advance(state);
-  if (!term) { render(); updateContextView(); return; }
-  stopAuto();
+// Run one live turn through whichever brain is selected. Async so the Gemini
+// path can await 4 parallel API calls; the stub path resolves synchronously.
+async function liveTurn() {
+  if (state.status !== "ready" && state.status !== "playing") return "done";
+  const term = geminiActive()
+    ? await advanceGemini(state, getApiKey())
+    : advance(state);
+  if (!term) { render(); updateContextView(); updateBrainNote(); return null; }
   recordGame(term, state.score);
   render();
   updateContextView();
   renderStats();
+  updateBrainNote();
   setStatus(ENDINGS[term](state));
+  return term;
 }
 
 // ===================================================================
@@ -648,29 +781,64 @@ function setStatus(msg) {
 }
 
 // ---- Auto-play loop -----------------------------------------------------
+// Self-scheduling (setTimeout) instead of setInterval, so an async Gemini turn
+// fully completes before the next turn starts. inFlight guards against overlap.
+const TURN_DELAY = 250;
 let timer = null;
+let running = false;
+let inFlight = false;
 const playBtn = document.getElementById("play");
 
+async function stepOnce() {
+  if (inFlight) return;
+  inFlight = true;
+  try { return await liveTurn(); }
+  finally { inFlight = false; }
+}
+
+async function autoLoop() {
+  if (!running || inFlight) return;
+  const term = await stepOnce();
+  if (term) { stopAuto(); return; }              // game ended
+  if (running) timer = setTimeout(autoLoop, TURN_DELAY);
+}
+
 function startAuto() {
-  if (timer) return;
-  timer = setInterval(step, 400);
+  if (running) return;
+  running = true;
   playBtn.textContent = "Pause";
+  autoLoop();
 }
 function stopAuto() {
-  if (timer) { clearInterval(timer); timer = null; }
+  running = false;
+  if (timer) { clearTimeout(timer); timer = null; }
   playBtn.textContent = "Play";
 }
 function toggleAuto() {
   if (["caught", "escaped", "cleared"].includes(state.status)) return;
-  timer ? stopAuto() : startAuto();
+  running ? stopAuto() : startAuto();
+}
+
+function updateBrainNote() {
+  const note = document.getElementById("brainnote");
+  if (getMode() === "stub") {
+    note.textContent = "Stub mode — local decisions, no API calls.";
+  } else if (!getApiKey()) {
+    note.textContent = "Gemini selected — enter an API key (falls back to stub until then).";
+  } else {
+    note.textContent = `Gemini mode — 4 ghost moves/turn via ${GEMINI_MODEL}`
+      + (GEMINI_FALLBACKS ? ` · ${GEMINI_FALLBACKS} stub fallback(s)` : "");
+  }
 }
 
 // ---- Wiring -------------------------------------------------------------
 playBtn.addEventListener("click", toggleAuto);
-document.getElementById("step").addEventListener("click", () => { stopAuto(); step(); });
+document.getElementById("step").addEventListener("click", () => { stopAuto(); stepOnce(); });
 document.getElementById("new").addEventListener("click", newGame);
 document.getElementById("batch").addEventListener("click", () => runBatch(200));
 document.getElementById("resetstats").addEventListener("click", resetStats);
+document.getElementById("mode").addEventListener("change", updateBrainNote);
+document.getElementById("apikey").addEventListener("input", updateBrainNote);
 
 // ---- SKILL.md viewer ----------------------------------------------------
 // Shows the live contents of whichever .md the ghosts are actually reading
@@ -712,10 +880,11 @@ window.OMEGA = {
       status: state.status,
     };
   },
-  step,
+  step: () => stepOnce(),
   newGame,
   runBatch,
   resetStats,
+  get brain() { return { mode: getMode(), hasKey: !!getApiKey(), fallbacks: GEMINI_FALLBACKS }; },
   buildContext: i => buildContext(state, i),  // inspect a ghost's context
   get stats() { return { ...STATS }; },
   get skills() { return { ...SKILLS }; },
@@ -728,6 +897,7 @@ buildBoard();
 newGame();
 renderStats();
 renderSkillView();                       // show inline defaults immediately
+updateBrainNote();                       // reflect default stub mode
 loadSkills().then(renderSkillView);      // upgrade to on-disk .md when served
 </script>
 </body>
