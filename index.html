@@ -997,24 +997,34 @@ function buildReflexionPrompt(summary) {
     "- Comment lines start with '#'. Directives are plain lines (no '#').",
     "",
     "OUTPUT FORMAT — follow EXACTLY:",
-    "- Do NOT use JSON. Do NOT use markdown or code fences.",
-    "- Return the five files as delimited blocks, each introduced by a line that is",
-    "  exactly the delimiter, then the raw file content (multiple lines allowed,",
-    "  including '#' comment/reason lines), then the next delimiter. Finish with",
-    "  the ===END=== line. Put nothing else before or after.",
-    "- Use these delimiter lines exactly, in this order:",
+    "- Do any thinking SILENTLY. Do NOT explain your reasoning. Do NOT write any",
+    "  prose, preamble, notes, or summary.",
+    "- Output ONLY the five delimited blocks. The VERY FIRST characters of your reply",
+    "  must be `===GHOST_A===`, and the VERY LAST line must be `===END===`.",
+    "  Put NOTHING before ===GHOST_A=== and NOTHING after ===END===.",
+    "- No JSON. No markdown. No code fences.",
+    "- Each block is the delimiter line, then the raw .md content (one directive per",
+    "  line plus at least one `# reason:` line). Use the labels exactly and in order.",
+    "",
+    "Here is a COMPLETE example of the exact format to imitate (write your own",
+    "strategy, not this content):",
     "",
     "===GHOST_A===",
-    "# reason: <why>",
-    "<directives, one per line>",
+    "# reason: primary chaser to keep Pac-Man running",
+    "chase",
     "===GHOST_B===",
-    "<...>",
+    "# reason: flank from the far side",
+    "intercept",
+    "support A",
     "===GHOST_C===",
-    "<...>",
+    "# reason: seal the north choke where he slips out",
+    "guard 1,5",
     "===GHOST_D===",
-    "<...>",
+    "# reason: seal the other north choke",
+    "guard 2,5",
     "===TEAM===",
-    "<...>",
+    "# reason: herd Pac-Man into the north dead-ends",
+    "herd north",
     "===END===",
   ].join("\n");
 }
@@ -1026,7 +1036,10 @@ const BLOCK_LABELS = { GHOST_A: "ghost_a", GHOST_B: "ghost_b", GHOST_C: "ghost_c
 // Parse the delimited block format Gemini returns:
 //   ===GHOST_A===\n<content>\n===GHOST_B===\n...===TEAM===\n...===END===
 // Splitting on the ===NAME=== delimiter lines naturally tolerates multi-line
-// content, '#' comments, quotes, and commas with no escaping at all.
+// content, '#' comments, quotes, and commas with no escaping at all. Any prose
+// before the first delimiter or after ===END=== is ignored. Returns only the
+// blocks that were actually found with non-empty content (may be partial or
+// empty); the caller decides how to handle missing ones.
 function parseSkillUpdate(text) {
   const raw = (text || "").replace(/```[a-z]*\n?/gi, "");   // drop any stray fences
   // Match each "===LABEL===" delimiter line and capture label + position.
@@ -1043,11 +1056,10 @@ function parseSkillUpdate(text) {
     const key = BLOCK_LABELS[label];
     if (!key) continue;                                     // unknown label -> ignore
     const next = marks[i + 1] ? marks[i + 1].start : raw.length;
-    out[key] = raw.slice(contentStart, next).replace(/^\n/, "").replace(/\s+$/, "");
+    const content = raw.slice(contentStart, next).replace(/^\n/, "").replace(/\s+$/, "");
+    if (content.trim()) out[key] = content;                 // skip empty blocks
   }
-  const missing = SKILL_KEYS.filter(k => typeof out[k] !== "string");
-  if (missing.length) throw new Error("missing block(s): " + missing.join(", "));
-  return out;
+  return out;                                               // possibly partial/empty
 }
 
 let LEARN_ROUNDS = [];          // [{ round, catchRate, avgTurns }]
@@ -1120,18 +1132,22 @@ async function learn(rounds) {
         continue;                                     // skip gracefully, keep going
       }
 
-      let updated;
-      try {
-        updated = parseSkillUpdate(raw);
-      } catch (e) {
-        // Parsing failed even after repairs — show the RAW response and skip.
-        learnLog(`Round ${roundNo}: could not parse Gemini blocks — ${e.message}. Raw response below:`);
+      const updated = parseSkillUpdate(raw);
+      const found = Object.keys(updated);
+      if (found.length === 0) {
+        // No usable blocks at all (likely the model emitted only prose/thinking).
+        learnLog(`Round ${roundNo}: no valid blocks in Gemini reply (likely prose/thinking). Raw response below:`);
         learnLog(raw);
-        setStatus(`Round ${roundNo}: unparseable response from Gemini; round skipped (see learning log).`);
+        setStatus(`Round ${roundNo}: no usable blocks from Gemini; round skipped (see learning log).`);
         continue;
       }
 
-      for (const k of Object.keys(updated)) SKILLS[k] = updated[k];
+      // Keep every block that parsed; leave the current .md for any that are missing.
+      for (const k of found) SKILLS[k] = updated[k];
+      const missing = SKILL_KEYS.filter(k => !found.includes(k));
+      if (missing.length) {
+        learnLog(`Round ${roundNo}: applied ${found.length}/5 blocks; kept current .md for missing [${missing.join(", ")}].`);
+      }
       renderSkillView();                              // user watches the .md fill in
       LAST_SUMMARY = simulateBatch(LEARN_BATCH);      // re-measure with new strategies
       LEARN_ROUNDS.push({ round: roundNo, catchRate: LAST_SUMMARY.catchRate, avgTurns: LAST_SUMMARY.avgTurns });
