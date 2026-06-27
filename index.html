@@ -134,6 +134,33 @@
     font-size: 11px;
     line-height: 1.35;
   }
+
+  /* SKILL.md viewer */
+  #skills { width: 540px; max-width: 90vw; display: flex; flex-direction: column; gap: 8px; }
+  #skills .label { font-size: 12px; opacity: 0.6; }
+  .tabs { display: flex; gap: 6px; flex-wrap: wrap; }
+  .tab {
+    padding: 6px 12px;
+    font-size: 13px;
+    background: #20204e;
+    border: 1px solid #2a2a6a;
+    border-bottom: 3px solid transparent;
+  }
+  .tab:hover { background: #2c2c66; }
+  .tab.active { background: #11112e; border-bottom-color: var(--accent, #36e0e0); }
+  #skillview {
+    white-space: pre-wrap;
+    overflow: auto;
+    min-height: 120px;
+    max-height: 280px;
+    background: #05051a;
+    border: 1px solid #2a2a6a;
+    border-radius: 6px;
+    padding: 12px;
+    font-size: 12px;
+    line-height: 1.45;
+    margin: 0;
+  }
 </style>
 </head>
 <body>
@@ -168,6 +195,18 @@
     <summary>Decision context (Ghost A, latest turn) — what each ghost brain reads</summary>
     <pre id="ctx">Run a turn to populate the decision context.</pre>
   </details>
+
+  <div id="skills">
+    <span class="label">SKILL.md files (the strategies each ghost reads — watch them change as the ghosts learn)</span>
+    <div class="tabs">
+      <button class="tab" data-skill="ghost_a" style="--accent:#ff4d4d">Ghost A</button>
+      <button class="tab" data-skill="ghost_b" style="--accent:#ff9ed8">Ghost B</button>
+      <button class="tab" data-skill="ghost_c" style="--accent:#36e0e0">Ghost C</button>
+      <button class="tab" data-skill="ghost_d" style="--accent:#ffae42">Ghost D</button>
+      <button class="tab" data-skill="team"    style="--accent:#e8e8ff">Team</button>
+    </div>
+    <pre id="skillview"></pre>
+  </div>
 
 <script>
 /* ===================================================================
@@ -633,6 +672,28 @@ document.getElementById("new").addEventListener("click", newGame);
 document.getElementById("batch").addEventListener("click", () => runBatch(200));
 document.getElementById("resetstats").addEventListener("click", resetStats);
 
+// ---- SKILL.md viewer ----------------------------------------------------
+// Shows the live contents of whichever .md the ghosts are actually reading
+// (inline defaults via file://, or the fetched files when served). Re-render
+// after loadSkills()/reloadSkills() so learned edits show up here too.
+let activeSkill = "ghost_a";
+const skillTabs = [...document.querySelectorAll(".tab")];
+
+function renderSkillView() {
+  const text = (SKILLS[activeSkill] || "").trim();
+  document.getElementById("skillview").textContent =
+    text || "(empty — this strategy file has no content yet)";
+  skillTabs.forEach(t =>
+    t.classList.toggle("active", t.dataset.skill === activeSkill));
+}
+
+skillTabs.forEach(tab => {
+  tab.addEventListener("click", () => {
+    activeSkill = tab.dataset.skill;
+    renderSkillView();
+  });
+});
+
 // ---- Public API ---------------------------------------------------------
 window.OMEGA = {
   getState() {
@@ -658,7 +719,7 @@ window.OMEGA = {
   buildContext: i => buildContext(state, i),  // inspect a ghost's context
   get stats() { return { ...STATS }; },
   get skills() { return { ...SKILLS }; },
-  reloadSkills: () => loadSkills(),
+  reloadSkills: () => loadSkills().then(renderSkillView),
   config: { SIZE, MAX_TURNS, START, CHOKES },
 };
 
@@ -666,7 +727,8 @@ window.OMEGA = {
 buildBoard();
 newGame();
 renderStats();
-loadSkills();  // upgrade from inline defaults to on-disk .md when served
+renderSkillView();                       // show inline defaults immediately
+loadSkills().then(renderSkillView);      // upgrade to on-disk .md when served
 </script>
 </body>
 </html>
