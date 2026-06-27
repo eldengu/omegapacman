@@ -1,0 +1,607 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>OmegaPacman</title>
+<style>
+  :root {
+    --bg: #07071c;
+    --panel: #11112e;
+    --panel-2: #181840;
+    --edge: #2a2a6a;
+    --ink: #e8e8ff;
+    --muted: #9aa0d6;
+    --accent: #ffe000;
+    --wall: #1f3bff;
+    --wall-edge: #7d96ff;
+    --floor: #05051a;
+    --cell: 40px;
+    /* entity colors */
+    --pac: #ffe000;
+    --atlanta: #ff4d4d;
+    --berkeley: #5b8cff;
+    --chicago: #36e0e0;
+    --delaware: #ffae42;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: radial-gradient(1200px 600px at 50% -10%, #15154a 0%, var(--bg) 60%);
+    color: var(--ink);
+    font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+    min-height: 100vh;
+  }
+
+  /* ---- screen system ---- */
+  .screen { display: none; min-height: 100vh; padding: 28px; }
+  .screen.active { display: flex; flex-direction: column; align-items: center; }
+  .hidden { display: none !important; }
+
+  h1.title {
+    font-size: 52px;
+    letter-spacing: 4px;
+    margin: 6px 0 2px;
+    color: var(--accent);
+    text-shadow: 0 0 18px rgba(255,224,0,0.35);
+  }
+  .tagline { color: var(--muted); margin: 0 0 28px; font-size: 13px; text-align: center; max-width: 560px; }
+
+  /* ---- buttons / inputs ---- */
+  button {
+    font: inherit;
+    padding: 12px 22px;
+    border: 1px solid var(--edge);
+    border-radius: 10px;
+    background: var(--panel-2);
+    color: var(--ink);
+    cursor: pointer;
+    transition: background .12s, transform .02s;
+  }
+  button:hover { background: #23235a; }
+  button:active { transform: translateY(1px); }
+  button.primary { background: var(--accent); color: #1a1a00; border-color: #b9a200; font-weight: bold; }
+  button.primary:hover { background: #fff04d; }
+  button.small { padding: 7px 12px; font-size: 13px; border-radius: 8px; }
+  button.ghosticon { padding: 6px 10px; font-size: 18px; line-height: 1; }
+
+  input[type="text"], input[type="password"], input[type="number"] {
+    font: inherit;
+    padding: 11px 13px;
+    background: var(--floor);
+    color: var(--ink);
+    border: 1px solid var(--edge);
+    border-radius: 8px;
+    width: 360px;
+    max-width: 80vw;
+  }
+  label.field { display: flex; flex-direction: column; gap: 8px; font-size: 14px; color: var(--muted); }
+
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--edge);
+    border-radius: 16px;
+    padding: 30px 34px;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+    align-items: center;
+    box-shadow: 0 18px 50px rgba(0,0,0,0.45);
+    margin-top: 6vh;
+  }
+  .card h2 { margin: 0; font-size: 22px; }
+  .row { display: flex; gap: 14px; flex-wrap: wrap; justify-content: center; }
+  .hint { color: var(--muted); font-size: 12px; max-width: 380px; text-align: center; }
+
+  /* ---- ghost legend chips ---- */
+  .legend { display: flex; gap: 12px; flex-wrap: wrap; justify-content: center; font-size: 12px; color: var(--muted); }
+  .chip { display: inline-flex; align-items: center; gap: 6px; }
+  .dot { width: 12px; height: 12px; border-radius: 50%; display: inline-block; }
+
+  /* ===================== GAME SCREEN ===================== */
+  #screen-game { padding: 18px 22px; }
+  #gametop {
+    width: 100%;
+    max-width: 1100px;
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    background: var(--panel);
+    border: 1px solid var(--edge);
+    border-radius: 12px;
+    padding: 12px 16px;
+  }
+  #gametop .stat { font-size: 14px; color: var(--muted); }
+  #gametop .stat b { color: var(--accent); font-size: 18px; margin-left: 4px; }
+  #gametop .spacer { flex: 1; }
+
+  #turnlabel {
+    width: 100%;
+    max-width: 1100px;
+    text-align: center;
+    font-size: 34px;
+    font-weight: bold;
+    letter-spacing: 2px;
+    margin: 14px 0;
+    padding: 10px;
+    border-radius: 12px;
+    background: var(--panel-2);
+    border: 1px solid var(--edge);
+    text-shadow: 0 0 14px currentColor;
+  }
+
+  #gamerow {
+    width: 100%;
+    max-width: 1100px;
+    display: flex;
+    gap: 20px;
+    align-items: flex-start;
+  }
+  #boardpane { display: flex; flex-direction: column; gap: 12px; align-items: center; }
+
+  #board {
+    display: grid;
+    grid-template-columns: repeat(10, var(--cell));
+    grid-template-rows: repeat(10, var(--cell));
+    gap: 2px;
+    background: #000;
+    padding: 6px;
+    border-radius: 10px;
+    box-shadow: 0 0 0 2px var(--edge);
+  }
+  .cell {
+    width: var(--cell); height: var(--cell);
+    background: var(--floor);
+    border-radius: 4px;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .cell.wall {
+    background: var(--wall);
+    border: 2px solid var(--wall-edge);
+    box-shadow: inset 0 0 6px rgba(0,0,0,0.55);
+  }
+  .pellet { width: 16%; height: 16%; border-radius: 50%; background: #ffd9a0; }
+  .pac {
+    width: 74%; height: 74%; border-radius: 50%; background: var(--pac);
+    clip-path: polygon(100% 35%, 50% 50%, 100% 65%, 100% 0, 0 0, 0 100%, 100% 100%);
+  }
+  .ghost {
+    width: 74%; height: 74%; border-radius: 50% 50% 18% 18%; position: relative;
+  }
+  .ghost::before, .ghost::after {
+    content: ""; position: absolute; top: 30%; width: 22%; height: 26%;
+    background: #fff; border-radius: 50%;
+  }
+  .ghost::before { left: 16%; } .ghost::after { right: 16%; }
+
+  #textboard {
+    margin: 0;
+    background: var(--floor);
+    border: 1px solid var(--edge);
+    border-radius: 10px;
+    padding: 14px 18px;
+    font-size: 16px;
+    line-height: 1.35;
+    letter-spacing: 3px;
+    color: var(--ink);
+  }
+  .boardctrls { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+
+  /* memory panel */
+  #memorypane {
+    flex: 1;
+    min-width: 280px;
+    background: var(--panel);
+    border: 1px solid var(--edge);
+    border-radius: 12px;
+    padding: 14px 16px;
+  }
+  #memorypane h3 { margin: 2px 0 10px; font-size: 16px; }
+  .mem { margin-bottom: 12px; }
+  .mem .memhdr { display: flex; align-items: center; gap: 8px; font-size: 13px; margin-bottom: 4px; }
+  .mdbox {
+    margin: 0;
+    background: var(--floor);
+    border: 1px solid var(--edge);
+    border-radius: 8px;
+    padding: 8px 10px;
+    font-size: 11px;
+    line-height: 1.4;
+    white-space: pre-wrap;
+    max-height: 90px;
+    overflow: auto;
+    color: var(--muted);
+  }
+
+  /* settings overlay */
+  .overlay {
+    position: fixed; inset: 0;
+    background: rgba(3,3,15,0.7);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 50;
+  }
+  .overlay .card { margin-top: 0; }
+
+  /* result */
+  .verdict { font-size: 40px; font-weight: bold; letter-spacing: 3px; }
+  .verdict.win { color: #4dff88; text-shadow: 0 0 18px rgba(77,255,136,.4); }
+  .verdict.lose { color: #ff5d5d; text-shadow: 0 0 18px rgba(255,93,93,.4); }
+  .resultline { font-size: 16px; color: var(--muted); }
+</style>
+</head>
+<body>
+
+  <!-- ============ SCREEN 1: START ============ -->
+  <section id="screen-start" class="screen active">
+    <h1 class="title">OmegaPacman</h1>
+    <p class="tagline">A turn-based grid chase where four ghost agents — Atlanta, Berkeley, Chicago, Delaware — learn to cooperate and catch Pac-Man. Nobody codes the teamwork; it emerges.</p>
+    <div class="card">
+      <h2>Main Menu</h2>
+      <div class="row">
+        <button class="primary" data-go="apikey">New Game</button>
+        <button id="exitBtn">Exit</button>
+      </div>
+      <div class="legend">
+        <span class="chip"><span class="dot" style="background:var(--pac)"></span>Pac-Man</span>
+        <span class="chip"><span class="dot" style="background:var(--atlanta)"></span>Atlanta</span>
+        <span class="chip"><span class="dot" style="background:var(--berkeley)"></span>Berkeley</span>
+        <span class="chip"><span class="dot" style="background:var(--chicago)"></span>Chicago</span>
+        <span class="chip"><span class="dot" style="background:var(--delaware)"></span>Delaware</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ SCREEN 2: API KEY ============ -->
+  <section id="screen-apikey" class="screen">
+    <h1 class="title">OmegaPacman</h1>
+    <div class="card">
+      <h2>Connect a brain</h2>
+      <label class="field">Grok / xAI API key
+        <input id="apikeyInput" type="password" autocomplete="off" spellcheck="false"
+               placeholder="xai-..." />
+      </label>
+      <p class="hint">Stored in memory only for this session — no calls are made yet (UI mockup).</p>
+      <div class="row">
+        <button data-go="start">Back</button>
+        <button class="primary" id="apikeyNext">Next</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ SCREEN 3: SETUP ============ -->
+  <section id="screen-setup" class="screen">
+    <h1 class="title">OmegaPacman</h1>
+    <div class="card">
+      <h2>Game setup</h2>
+      <label class="field">How many rounds?
+        <input id="roundsInput" type="number" min="1" max="50" value="3" />
+      </label>
+      <p class="hint">Each round, the ghosts get one game to catch Pac-Man, then reflect on what happened.</p>
+      <div class="row">
+        <button data-go="apikey">Back</button>
+        <button class="primary" id="playBtn">Play</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ SCREEN 4: GAME ============ -->
+  <section id="screen-game" class="screen">
+    <div id="gametop">
+      <div class="stat">Round <b id="g-round">1 / 3</b></div>
+      <div class="stat">Score <b id="g-score">120</b></div>
+      <div class="stat">Turn <b id="g-turn">1 / 30</b></div>
+      <div class="spacer"></div>
+      <button id="gear" class="ghosticon" title="Settings">⚙️</button>
+    </div>
+
+    <div id="turnlabel">Pacman's Turn</div>
+
+    <div id="gamerow">
+      <div id="boardpane">
+        <div id="board"></div>
+        <pre id="textboard" class="hidden"></pre>
+        <div class="boardctrls">
+          <button id="stepBtn" class="primary">Step</button>
+          <button id="textToggle">Text view</button>
+          <button id="catchBtn">Simulate catch ▸ Result</button>
+          <button id="quitBtn">Quit</button>
+        </div>
+      </div>
+
+      <div id="memorypane">
+        <h3>Memory <span style="color:var(--muted);font-weight:normal;font-size:12px">(per-ghost + team SKILL.md)</span></h3>
+        <div id="memboxes"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ SCREEN 5: RESULT ============ -->
+  <section id="screen-result" class="screen">
+    <h1 class="title">OmegaPacman</h1>
+    <div class="card">
+      <div id="resVerdict" class="verdict win">VICTORY</div>
+      <div id="resLine" class="resultline">Round 1 — score 80, caught in 12 turns</div>
+      <div class="row">
+        <button class="primary" id="againBtn">Play Again</button>
+        <button data-go="start">Main Menu</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ SETTINGS OVERLAY ============ -->
+  <div id="settingsOverlay" class="overlay hidden">
+    <div class="card">
+      <h2>⚙️ Settings</h2>
+      <label class="field">Grok / xAI API key
+        <input id="settingsKey" type="password" autocomplete="off" spellcheck="false" placeholder="xai-..." />
+      </label>
+      <p class="hint">Mockup — the key is kept in memory only and not used for any calls yet.</p>
+      <div class="row">
+        <button class="primary" id="settingsClose">Done</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+/* ===================================================================
+   OmegaPacman — STEP 1: UI / screens mockup only.
+   No game logic, no API calls. Placeholder data + a Step button that
+   cycles the turn label and updates the (display-only) score/turn.
+   =================================================================== */
+
+// ---- mock world data ----------------------------------------------------
+const GHOSTS = [
+  { key: "atlanta",  name: "Atlanta",  color: "var(--atlanta)",  pos: { r: 1, c: 1 } },
+  { key: "berkeley", name: "Berkeley", color: "var(--berkeley)", pos: { r: 1, c: 8 } },
+  { key: "chicago",  name: "Chicago",  color: "var(--chicago)",  pos: { r: 8, c: 1 } },
+  { key: "delaware", name: "Delaware", color: "var(--delaware)", pos: { r: 8, c: 8 } },
+];
+const PACMAN = { pos: { r: 5, c: 4 } };
+
+// 10x10 mock maze (1=wall, 0=floor). Looks mazey; layout only, no logic.
+const MAZE = [
+  [1,1,1,1,1,1,1,1,1,1],
+  [1,0,0,0,1,0,0,0,0,1],
+  [1,0,1,0,1,0,1,1,1,1],
+  [1,0,1,0,0,0,0,0,0,1],
+  [1,0,1,1,1,1,1,1,0,1],
+  [1,0,0,0,0,0,0,1,0,1],
+  [1,1,1,1,1,0,1,1,0,1],
+  [1,0,0,0,1,0,0,0,0,1],
+  [1,0,1,0,0,0,1,1,0,1],
+  [1,1,1,1,1,1,1,1,1,1],
+];
+const SIZE = 10;
+
+// Placeholder SKILL.md text for the Memory panel.
+const MOCK_MEMORY = {
+  atlanta:  "# Atlanta\n# reason: starter — learn by chasing\nchase",
+  berkeley: "# Berkeley\n# reason: starter — explore for now\n(no directives yet)",
+  chicago:  "# Chicago\n# reason: starter — explore for now\n(no directives yet)",
+  delaware: "# Delaware\n# reason: starter — explore for now\n(no directives yet)",
+  team:     "# Team (shared)\n# reason: no shared plan yet\n(filled in as the ghosts learn)",
+};
+const MEM_ORDER = [
+  { key: "atlanta",  name: "Atlanta",  color: "var(--atlanta)" },
+  { key: "berkeley", name: "Berkeley", color: "var(--berkeley)" },
+  { key: "chicago",  name: "Chicago",  color: "var(--chicago)" },
+  { key: "delaware", name: "Delaware", color: "var(--delaware)" },
+  { key: "team",     name: "Team",     color: "var(--ink)" },
+];
+
+// Turn cycle: Pac-Man, then the four ghosts.
+const ACTORS = [
+  { label: "Pacman's Turn",   color: "var(--pac)" },
+  { label: "Atlanta's Turn",  color: "var(--atlanta)" },
+  { label: "Berkeley's Turn", color: "var(--berkeley)" },
+  { label: "Chicago's Turn",  color: "var(--chicago)" },
+  { label: "Delaware's Turn", color: "var(--delaware)" },
+];
+
+// ---- display-only scoring config ----------------------------------------
+const START_SCORE = 120;
+const MAX_TURN = 30;
+
+// ---- session state (mock) -----------------------------------------------
+const game = {
+  apiKey: "",
+  rounds: 3,
+  round: 1,
+  turn: 1,
+  score: START_SCORE,
+  actor: 0,         // index into ACTORS
+};
+
+// ===================================================================
+// Screen navigation
+// ===================================================================
+function showScreen(name) {
+  document.querySelectorAll(".screen").forEach(s => s.classList.remove("active"));
+  document.getElementById("screen-" + name).classList.add("active");
+  window.scrollTo(0, 0);
+}
+document.querySelectorAll("[data-go]").forEach(btn =>
+  btn.addEventListener("click", () => showScreen(btn.dataset.go)));
+
+// Start screen
+document.getElementById("exitBtn").addEventListener("click", () => {
+  document.body.innerHTML =
+    '<div style="min-height:100vh;display:flex;align-items:center;justify-content:center;' +
+    'color:#ffe000;font-family:ui-monospace,monospace;font-size:24px;letter-spacing:2px;">' +
+    '👋 Thanks for playing OmegaPacman</div>';
+});
+
+// API key screen
+document.getElementById("apikeyNext").addEventListener("click", () => {
+  game.apiKey = document.getElementById("apikeyInput").value.trim();
+  syncKeyFields();
+  showScreen("setup");
+});
+
+// Setup screen
+document.getElementById("playBtn").addEventListener("click", () => {
+  game.rounds = Math.max(1, parseInt(document.getElementById("roundsInput").value, 10) || 1);
+  startGame();
+  showScreen("game");
+});
+
+// Result screen
+document.getElementById("againBtn").addEventListener("click", () => {
+  startGame();
+  showScreen("game");
+});
+
+// ===================================================================
+// Game screen
+// ===================================================================
+function startGame() {
+  game.round = 1;
+  game.turn = 1;
+  game.score = START_SCORE;
+  game.actor = 0;
+  buildBoard();
+  renderMemory();
+  renderGame();
+}
+
+function renderGame() {
+  document.getElementById("g-round").textContent = `${game.round} / ${game.rounds}`;
+  document.getElementById("g-score").textContent = game.score;
+  document.getElementById("g-turn").textContent = `${game.turn} / ${MAX_TURN}`;
+  const a = ACTORS[game.actor];
+  const label = document.getElementById("turnlabel");
+  label.textContent = a.label;
+  label.style.color = a.color;
+  drawEntities();
+  drawTextBoard();
+}
+
+// Step: advance to the next actor. Ghost moves cost -1 each; finishing the
+// four ghosts advances the turn. At turn 30 with no catch -> lose (display only).
+document.getElementById("stepBtn").addEventListener("click", () => {
+  game.actor = (game.actor + 1) % ACTORS.length;
+  if (game.actor !== 0) {
+    game.score = Math.max(0, game.score - 1);   // a ghost just moved
+  } else {
+    game.turn += 1;                             // wrapped back to Pac-Man
+    if (game.turn > MAX_TURN) {
+      game.score = 0;
+      return endRound(false);                   // out of turns -> lose
+    }
+  }
+  renderGame();
+});
+
+document.getElementById("catchBtn").addEventListener("click", () => endRound(true));
+document.getElementById("quitBtn").addEventListener("click", () => showScreen("start"));
+
+function endRound(win) {
+  const v = document.getElementById("resVerdict");
+  v.textContent = win ? "VICTORY" : "DEFEAT";
+  v.className = "verdict " + (win ? "win" : "lose");
+  document.getElementById("resLine").textContent = win
+    ? `Round ${game.round} — score ${game.score}, caught in ${game.turn} turns`
+    : `Round ${game.round} — Pac-Man escaped after ${MAX_TURN} turns, score 0`;
+  showScreen("result");
+}
+
+// ---- board rendering (graphical) ----------------------------------------
+const board = document.getElementById("board");
+function buildBoard() {
+  board.innerHTML = "";
+  for (let r = 0; r < SIZE; r++)
+    for (let c = 0; c < SIZE; c++) {
+      const d = document.createElement("div");
+      d.className = "cell" + (MAZE[r][c] === 1 ? " wall" : "");
+      d.id = `cell-${r}-${c}`;
+      board.appendChild(d);
+    }
+}
+function drawEntities() {
+  document.querySelectorAll(".cell").forEach(c => { c.innerHTML = ""; });
+  // a few mock pellets on floor cells
+  for (let r = 0; r < SIZE; r++)
+    for (let c = 0; c < SIZE; c++)
+      if (MAZE[r][c] === 0 && (r + c) % 3 === 0 && !occupied(r, c)) {
+        const cell = document.getElementById(`cell-${r}-${c}`);
+        const dot = document.createElement("div"); dot.className = "pellet";
+        cell.appendChild(dot);
+      }
+  GHOSTS.forEach(g => {
+    const cell = document.getElementById(`cell-${g.pos.r}-${g.pos.c}`);
+    const el = document.createElement("div");
+    el.className = "ghost"; el.style.background = g.color; el.title = g.name;
+    cell.appendChild(el);
+  });
+  const pc = document.getElementById(`cell-${PACMAN.pos.r}-${PACMAN.pos.c}`);
+  const pe = document.createElement("div"); pe.className = "pac"; pe.title = "Pac-Man";
+  pc.appendChild(pe);
+}
+function occupied(r, c) {
+  if (PACMAN.pos.r === r && PACMAN.pos.c === c) return true;
+  return GHOSTS.some(g => g.pos.r === r && g.pos.c === c);
+}
+
+// ---- board rendering (text matrix) --------------------------------------
+function drawTextBoard() {
+  const sym = (r, c) => {
+    if (PACMAN.pos.r === r && PACMAN.pos.c === c) return "P";
+    const g = GHOSTS.find(g => g.pos.r === r && g.pos.c === c);
+    if (g) return g.name[0];                 // A / B / C / D
+    return MAZE[r][c] === 1 ? "#" : ".";
+  };
+  let out = "    " + [...Array(SIZE).keys()].join(" ") + "\n";
+  for (let r = 0; r < SIZE; r++) {
+    let line = (r + " ").padStart(3) + " ";
+    for (let c = 0; c < SIZE; c++) line += sym(r, c) + " ";
+    out += line.trimEnd() + "\n";
+  }
+  out += "\nLegend: # wall  . floor  P Pac-Man  A Atlanta  B Berkeley  C Chicago  D Delaware";
+  document.getElementById("textboard").textContent = out;
+}
+document.getElementById("textToggle").addEventListener("click", () => {
+  const b = document.getElementById("board");
+  const t = document.getElementById("textboard");
+  const showText = b.classList.toggle("hidden");
+  t.classList.toggle("hidden", !showText);
+  document.getElementById("textToggle").textContent = showText ? "Board view" : "Text view";
+});
+
+// ---- memory panel -------------------------------------------------------
+function renderMemory() {
+  const wrap = document.getElementById("memboxes");
+  wrap.innerHTML = "";
+  for (const m of MEM_ORDER) {
+    const div = document.createElement("div");
+    div.className = "mem";
+    div.innerHTML =
+      `<div class="memhdr"><span class="dot" style="background:${m.color}"></span><b>${m.name}</b></div>`;
+    const pre = document.createElement("pre");
+    pre.className = "mdbox";
+    pre.textContent = MOCK_MEMORY[m.key];
+    div.appendChild(pre);
+    wrap.appendChild(div);
+  }
+}
+
+// ---- settings overlay ---------------------------------------------------
+function syncKeyFields() {
+  document.getElementById("apikeyInput").value = game.apiKey;
+  document.getElementById("settingsKey").value = game.apiKey;
+}
+document.getElementById("gear").addEventListener("click", () => {
+  document.getElementById("settingsKey").value = game.apiKey;
+  document.getElementById("settingsOverlay").classList.remove("hidden");
+});
+document.getElementById("settingsClose").addEventListener("click", () => {
+  game.apiKey = document.getElementById("settingsKey").value.trim();
+  syncKeyFields();
+  document.getElementById("settingsOverlay").classList.add("hidden");
+});
+
+// ---- boot ---------------------------------------------------------------
+showScreen("start");
+</script>
+</body>
+</html>
