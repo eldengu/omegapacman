@@ -242,6 +242,8 @@
     z-index: 50;
   }
   .overlay .card { margin-top: 0; }
+  .menucol { display: flex; flex-direction: column; gap: 12px; min-width: 220px; }
+  .menucol button { width: 100%; }
 
   /* result */
   .verdict { font-size: 40px; font-weight: bold; letter-spacing: 3px; }
@@ -324,7 +326,6 @@
         <div class="boardctrls">
           <button id="stepBtn" class="primary">Step</button>
           <button id="textToggle">Text view</button>
-          <button id="quitBtn">Quit</button>
         </div>
       </div>
 
@@ -367,16 +368,28 @@
     </div>
   </section>
 
-  <!-- ============ SETTINGS OVERLAY ============ -->
-  <div id="settingsOverlay" class="overlay hidden">
+  <!-- ============ SETTINGS MENU (gear) ============ -->
+  <div id="settingsMenu" class="overlay hidden">
     <div class="card">
       <h2>⚙️ Settings</h2>
+      <div class="menucol">
+        <button class="primary" id="menuApiKey">API Key</button>
+        <button id="menuQuit">Quit</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ API KEY OVERLAY ============ -->
+  <div id="settingsOverlay" class="overlay hidden">
+    <div class="card">
+      <h2>API Key</h2>
       <label class="field">Grok / xAI API key
         <input id="settingsKey" type="password" autocomplete="off" spellcheck="false" placeholder="xai-..." />
       </label>
       <p class="hint">Mockup — the key is kept in memory only and not used for any calls yet.</p>
       <div class="row">
-        <button class="primary" id="settingsClose">Done</button>
+        <button id="settingsCancel">Cancel</button>
+        <button class="primary" id="settingsClose">Save</button>
       </div>
     </div>
   </div>
@@ -577,7 +590,6 @@ document.getElementById("stepBtn").addEventListener("click", () => {
   renderGame();
 });
 
-document.getElementById("quitBtn").addEventListener("click", () => showScreen("start"));
 
 function endRound(win) {
   const v = document.getElementById("resVerdict");
@@ -667,19 +679,38 @@ document.querySelectorAll("#ghostTabs .memtab").forEach(tab =>
     renderGhostMem();
   }));
 
-// ---- settings overlay ---------------------------------------------------
+// ---- settings menu + API key overlay ------------------------------------
 function syncKeyFields() {
   document.getElementById("apikeyInput").value = game.apiKey;
   document.getElementById("settingsKey").value = game.apiKey;
 }
-document.getElementById("gear").addEventListener("click", () => {
+const show = (id, on) => document.getElementById(id).classList.toggle("hidden", !on);
+
+// Gear opens a small menu with exactly two options: API Key and Quit.
+document.getElementById("gear").addEventListener("click", () => show("settingsMenu", true));
+
+document.getElementById("menuApiKey").addEventListener("click", () => {
+  show("settingsMenu", false);
   document.getElementById("settingsKey").value = game.apiKey;
-  document.getElementById("settingsOverlay").classList.remove("hidden");
+  show("settingsOverlay", true);
 });
+document.getElementById("menuQuit").addEventListener("click", () => {
+  show("settingsMenu", false);
+  showScreen("start");
+});
+
+// API key dialog: Save stores the key; Cancel discards.
 document.getElementById("settingsClose").addEventListener("click", () => {
   game.apiKey = document.getElementById("settingsKey").value.trim();
   syncKeyFields();
-  document.getElementById("settingsOverlay").classList.add("hidden");
+  show("settingsOverlay", false);
+});
+document.getElementById("settingsCancel").addEventListener("click", () => show("settingsOverlay", false));
+
+// Click the dark backdrop (outside the card) to dismiss either overlay.
+["settingsMenu", "settingsOverlay"].forEach(id => {
+  const ov = document.getElementById(id);
+  ov.addEventListener("click", e => { if (e.target === ov) show(id, false); });
 });
 
 // ---- boot ---------------------------------------------------------------
