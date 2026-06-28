@@ -432,6 +432,18 @@
   .metric-row b.mwin { color: #4dff88; }
   .metric-row b.mlose { color: #ff5d5d; }
 
+  /* session results popup (per-round table) */
+  #resultsModal .card { width: 520px; max-width: 92vw; align-items: stretch; }
+  #resultsModal h2 { text-align: left; }
+  .resultsbody { max-height: 60vh; overflow: auto; }
+  .resultsbody .muted { color: var(--muted); font-style: italic; padding: 14px 4px; }
+  table.restbl { width: 100%; border-collapse: collapse; font-size: 14px; }
+  table.restbl th, table.restbl td { padding: 7px 12px; text-align: right; border-bottom: 1px solid var(--edge); }
+  table.restbl th:first-child, table.restbl td:first-child { text-align: left; }
+  table.restbl th { color: var(--muted); font-weight: normal; font-size: 12px; letter-spacing: 0.5px; position: sticky; top: 0; background: var(--panel); }
+  table.restbl td.rc-yes { color: #4dff88; font-weight: bold; }
+  table.restbl td.rc-no  { color: #ff5d5d; font-weight: bold; }
+
   /* result */
   .verdict { font-size: 40px; font-weight: bold; letter-spacing: 3px; }
   .verdict.win { color: #4dff88; text-shadow: 0 0 18px rgba(77,255,136,.4); }
@@ -525,6 +537,7 @@
           <button id="textToggle" title="Switch board / text view">Text view</button>
           <button id="logToggle" title="Open the activity log (debug)">Log</button>
           <button id="autoBtn" title="Auto-play the whole series of rounds">🔁 Auto: Off</button>
+          <button id="resultsBtn" title="Saved results for this session (per-round turns/score)">Result</button>
         </div>
       </div>
 
@@ -647,6 +660,17 @@
       <div class="row">
         <button id="logClear">Clear log</button>
         <button class="primary" id="logClose">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ SESSION RESULTS POPUP (per-round table) ============ -->
+  <div id="resultsModal" class="overlay hidden">
+    <div class="card">
+      <h2>Session results <span class="memsub" id="resultsSub"></span></h2>
+      <div id="resultsBody" class="resultsbody"></div>
+      <div class="row">
+        <button class="primary" id="resultsClose">Close</button>
       </div>
     </div>
   </div>
@@ -1864,7 +1888,7 @@ document.getElementById("settingsClose").addEventListener("click", () => {
 document.getElementById("settingsCancel").addEventListener("click", () => show("settingsOverlay", false));
 
 // Click the dark backdrop (outside the card) to dismiss any overlay.
-["settingsMenu", "settingsOverlay", "mdModal", "logModal"].forEach(id => {
+["settingsMenu", "settingsOverlay", "mdModal", "logModal", "resultsModal"].forEach(id => {
   const ov = document.getElementById(id);
   ov.addEventListener("click", e => { if (e.target === ov) show(id, false); });
 });
@@ -2089,6 +2113,77 @@ document.getElementById("replayPick").addEventListener("change", e => {
 });
 document.querySelectorAll("#replayTabs .memtab").forEach(tab =>
   tab.addEventListener("click", () => { replay.activeMd = tab.dataset.ghost; renderReplayMds(); }));
+
+// ===================================================================
+// SESSION RESULTS — a table of every saved round for THIS session.
+// Uses /list_rounds for the round list, then /load_round for each round's result.
+// ===================================================================
+// Normalize the (defensively-shaped) /list_rounds response into [{game, round}].
+async function fetchRoundList() {
+  const res = await fetch(LIST_ROUNDS_URL);
+  if (!res.ok) throw new Error("HTTP " + res.status);
+  const data = await res.json();
+  let items = [];
+  if (Array.isArray(data)) items = data;
+  else if (data && Array.isArray(data.rounds)) items = data.rounds;
+  else if (data && typeof data === "object") {
+    for (const [g, rs] of Object.entries(data)) {       // {gameN: [rounds...]}
+      const gn = parseInt(String(g).replace(/\D/g, ""), 10);
+      if (Array.isArray(rs)) for (const rr of rs) items.push({ game: gn, round: rr });
+    }
+  }
+  return items.map(it => {
+    if (Array.isArray(it)) return { game: it[0], round: it[1] };
+    if (typeof it === "number" || typeof it === "string") return { game: null, round: Number(it) };
+    return { game: it.game, round: it.round };
+  }).filter(it => it.round != null);
+}
+
+function renderResultsTable(rows) {
+  document.getElementById("resultsBody").innerHTML =
+    `<table class="restbl"><thead><tr><th>Round</th><th>Caught</th><th>Turns</th><th>Score</th></tr></thead><tbody>` +
+    rows.map(r =>
+      `<tr><td>${r.round}</td>` +
+      `<td class="${r.caught == null ? "" : (r.caught ? "rc-yes" : "rc-no")}">${r.caught == null ? "?" : (r.caught ? "✓" : "✗")}</td>` +
+      `<td>${r.turns == null ? "—" : r.turns}</td>` +
+      `<td>${r.score == null ? "—" : r.score}</td></tr>`
+    ).join("") +
+    `</tbody></table>`;
+}
+
+async function showSessionResults() {
+  show("resultsModal", true);
+  document.getElementById("resultsSub").textContent = `(game ${SESSION_NUMBER})`;
+  const body = document.getElementById("resultsBody");
+  body.innerHTML = `<div class="muted">Loading…</div>`;
+  try {
+    const list = await fetchRoundList();
+    let rounds = list
+      .filter(it => it.game == null || Number(it.game) === SESSION_NUMBER)   // this session only
+      .map(it => Number(it.round))
+      .filter(n => Number.isFinite(n));
+    rounds = [...new Set(rounds)].sort((a, b) => a - b);                      // ascending -> trend visible
+    if (!rounds.length) { body.innerHTML = `<div class="muted">No saved rounds yet for this session (game ${SESSION_NUMBER}).</div>`; return; }
+    const rows = [];
+    for (const r of rounds) {
+      try {
+        const res = await fetch(`${LOAD_ROUND_URL}?game=${SESSION_NUMBER}&round=${r}`);
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        const data = await res.json();
+        const result = data.result || {};
+        rows.push({ round: r, caught: result.caught ?? null, turns: result.turns ?? null, score: result.score ?? null });
+      } catch (e) {
+        rows.push({ round: r, caught: null, turns: null, score: null });     // couldn't read this round
+      }
+    }
+    renderResultsTable(rows);
+  } catch (e) {
+    body.innerHTML = `<div class="muted">Couldn't load results — ${escapeHtml(e.message)} (is the server running?)</div>`;
+  }
+}
+
+document.getElementById("resultsBtn").addEventListener("click", showSessionResults);
+document.getElementById("resultsClose").addEventListener("click", () => show("resultsModal", false));
 
 // ---- boot ---------------------------------------------------------------
 showScreen("start");
