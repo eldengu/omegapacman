@@ -693,7 +693,7 @@ const START = {
 };
 // Pac-Man is Gemini-driven: each turn its model picks a move to survive while
 // collecting pellets (see decidePacman). Pac-Man reads its FIXED pacman.md rule and
-// does NOT learn — only the ghosts learn (via Antigravity).
+// does NOT learn — only the ghosts learn (via direct Gemini training).
 
 // 14 rows x 34 cols maze (1=wall, 0=floor). The centre spells "CODE" with
 // doodle-style maze walls around it. Fully connected, zero dead-ends. Built from
@@ -719,14 +719,16 @@ const ROWS = 14, COLS = 34;
 const MAZE_TEXT = MAZE_ASCII.join("\n");
 
 // ---- Move + server config -----------------------------------------------
-// PER-MOVE calls go DIRECTLY from the browser to Gemini's OpenAI-compatible
-// endpoint (Bearer = the API key the user enters at game start) — fast, no server
-// round-trip. Only the SLOW learning + saving still POST to the local server:
-//   • /analyze    — Antigravity ghost learning (every game)
-//   • /save_round — per-round experiment save (fire-and-forget)
+// ALL LLM calls (Pac-Man moves, ghost moves, AND ghost training) go DIRECTLY from
+// the browser to Gemini's OpenAI-compatible endpoint (Bearer = the API key the
+// user enters at game start) — fast, all gemini-3.1-flash-lite. The local server
+// is used ONLY for experiment data:
+//   • /save_round              — per-round experiment save (fire-and-forget)
+//   • /load_round,/list_rounds — replay mode (read-only)
+// There is NO /analyze (Antigravity) call anymore.
 const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";
-const PACMAN_MODEL = "gemini-2.5-flash-lite";   // Pac-Man moves (direct Gemini)
-const GHOST_MODEL  = "gemini-2.5-flash-lite";   // ghost moves (direct Gemini)
+const PACMAN_MODEL = "gemini-3.1-flash-lite";   // Pac-Man moves (direct Gemini)
+const GHOST_MODEL  = "gemini-3.1-flash-lite";   // ghost moves + ghost training (direct Gemini)
 const SERVER_BASE = "http://localhost:5000";
 const SAVE_ROUND_URL = SERVER_BASE + "/save_round";   // {game,round,game_log,result,mds} (fire-and-forget)
 function apiKey() {
@@ -736,8 +738,8 @@ function apiKey() {
 const DIRV = { up: [-1, 0], down: [1, 0], left: [0, -1], right: [0, 1] };
 
 // SKILL.md memory — READ-ONLY during play. Pac-Man's note is a FIXED rule (it does
-// not learn). The ghosts' notes start empty and are rewritten by the Antigravity
-// learning server after each game. So: fixed Pac-Man vs a learning ghost swarm.
+// not learn). The ghosts' notes start empty and are rewritten by direct Gemini
+// training after each game. So: fixed Pac-Man vs a learning ghost swarm.
 const MEMORY = {
   pacman:   "# Pac-Man (fixed rules)\n\nEat pellets, avoid ghosts, maximize distance from the nearest ghost.\n",
   atlanta:  "# Atlanta\n\n(no strategy yet — learning comes later)\n",
@@ -804,7 +806,7 @@ document.getElementById("apikeyNext").addEventListener("click", () => {
 
 // Setup screen
 document.getElementById("playBtn").addEventListener("click", () => {
-  // Cap the experiment at 30 rounds max (Antigravity learning runs each round).
+  // Cap the experiment at 30 rounds max (ghost training runs each round).
   game.rounds = Math.min(30, Math.max(1, parseInt(document.getElementById("roundsInput").value, 10) || 1));
   startGame();
   showScreen("game");
@@ -1193,10 +1195,9 @@ function applyLearning(blocks) {
   return n;
 }
 
-// Gemini collective ghost learning. CURRENTLY OFF — the ghosts now learn via the
-// Antigravity server (see runAntigravityLearning), which this is replaced by.
-// Kept here, unused, so it's easy to re-enable. (Pac-Man solo learning still runs.)
-// ONE learning call with the same robust retry + fallback as the move calls.
+// Older transcript-based ghost learning. CURRENTLY OFF/UNUSED — ghost training now
+// runs via trainGhosts (direct Gemini call on the round's game log). Kept here for
+// reference; not called.
 async function learnFromGame(win) {
   const messages = [
     { role: "system", content: "You improve four cooperating ghosts' strategy notes after each game so they catch Pac-Man faster. Reply only in the exact delimited format requested." },
@@ -1504,13 +1505,13 @@ async function endGame(win) {
   again.textContent = game.round < game.rounds ? "Next Round" : "Play Again";
   renderMetrics();
 
-  // LEARNING before the next round: ONLY the ghosts learn, via the Antigravity
-  // server (collectGameLog → runAntigravityLearning). Pac-Man uses FIXED rules and
-  // does NOT learn (learnPacman is off). Antigravity is keyless and slow (1-2 min),
-  // so show "Antigravity analyzing…" while we wait, apply the .md when it returns,
-  // then continue. Updated notes show in the Memory panel.
-  setTurnLabel("Antigravity analyzing…", "var(--accent)", true);
-  await collectGameLog();                            // ghosts via Antigravity (every GAMES_PER_BATCH games)
+  // LEARNING before the next round: ONLY the ghosts learn, via a DIRECT Gemini
+  // training call (collectGameLog → trainGhosts) — no server. Pac-Man uses FIXED
+  // rules and does NOT learn (learnPacman is off). Show "Ghosts are learning…"
+  // while we wait, apply the .md when it returns, then continue. Updated notes
+  // show in the Memory panel.
+  setTurnLabel("Ghosts are learning…", "var(--accent)", true);
+  await collectGameLog();                            // ghosts trained directly (every GAMES_PER_BATCH games)
 
   show("resultModal", true);                        // modal over the board (no page switch)
   scheduleAutoProceed();                            // if Auto is on, advance to the next round
@@ -1656,15 +1657,14 @@ const gameLog = [];   // {kind:'api'|'move', actor, msg, fallback, model?, round
 let gameCount = 0;                 // completed games this session
 let currentGameMoves = [];         // MOVE lines for the in-progress game (reset each game)
 const gameLogsBuffer = [];         // rolling window: the last N games' MOVE-log strings
-const GAMES_PER_BATCH = 1;         // run Antigravity learning every N games (1 now; flip to 10 later)
-const ANTIGRAVITY_URL = "http://localhost:5000/analyze";   // local Antigravity ghost-learning server
+const GAMES_PER_BATCH = 1;         // run ghost training every N games (1 now; flip to 10 later)
 
 // ---- per-round experiment saving (POST /save_round, fire-and-forget) -----
 // "game" is a session number bumped once per page load (persisted in localStorage
 // so it differs across loads). "round" is a session-wide counter over completed
 // rounds, starting at 1. roundStartMds holds the five ghost/pacman .md as they were
 // AT THE START of the current round (the strategies going into it) — captured in
-// startRound, before the end-of-round Antigravity learning rewrites them.
+// startRound, before the end-of-round ghost training rewrites them.
 const SESSION_NUMBER = (() => {
   try {
     const n = (parseInt(localStorage.getItem("omega_session") || "0", 10) || 0) + 1;
@@ -1712,7 +1712,7 @@ function saveRound(win) {
 
 // Called once per completed game (from endGame): snapshot this game's MOVE log into
 // the rolling buffer; after every GAMES_PER_BATCH games, assemble the batch into one
-// clearly separated string and send it to the Antigravity server for ghost learning.
+// clearly separated string and train the ghosts on it (direct Gemini call).
 async function collectGameLog() {
   gameCount += 1;
   gameLogsBuffer.push(currentGameMoves.length ? currentGameMoves.join("\n") : "(no moves recorded)");
@@ -1723,38 +1723,69 @@ async function collectGameLog() {
       .map((g, i) => `=== GAME ${startNum + i} ===\n${g}`)
       .join("\n\n");
     console.log(`[OmegaPacman] ${gameCount} games completed — assembled MOVE log of the last ${gameLogsBuffer.length} games:\n\n${assembled}`);
-    await runAntigravityLearning(assembled);
+    await trainGhosts(assembled);
   }
 }
 
-// Ghost learning via the local Antigravity server (replaces the Gemini ghost
-// learning). POST the assembled MOVE log; the server replies with {md: "...===TEAM===
-// ===ATLANTA===...==="} which we parse (same delimited style as Gemini learning) and
-// use to overwrite the five ghost notes. Slow (1-2 min). If the server is unreachable
-// or the reply is unusable, warn and keep the existing .md — never crash.
-async function runAntigravityLearning(logText) {
-  try {
-    const res = await fetch(ANTIGRAVITY_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ log: logText }),
-    });
-    if (!res.ok) throw new Error("HTTP " + res.status);
-    const data = await res.json();
-    let md = data && data.md;
-    if (!md) throw new Error("empty 'md' in response");
-    // parseLearning expects a trailing marker after the last block; the server may
-    // omit ===END===, so add it if absent (reusing the existing delimited parser).
-    if (!/===END===/i.test(md)) md += "\n===END===";
-    const blocks = parseLearning(md);
-    if (!Object.keys(blocks).length) throw new Error("no ghost notes parsed from md");
-    const n = applyLearning(blocks);                 // overwrite the 5 ghost .md + re-render
-    console.log(`[OmegaPacman] Antigravity rewrote ${n}/5 ghost notes`);
-    logApi("Antigravity", `success — ${n}/5 ghost notes rewritten`, false, "antigravity");
-  } catch (e) {
-    console.warn(`[OmegaPacman] Antigravity unreachable/failed — keeping old .md: ${e.message}`);
-    logApi("Antigravity", `unreachable/failed — keeping old .md: ${oneLine(e.message)}`, true, "antigravity");
+// Ghost TRAINING via a DIRECT browser call to Gemini (GHOST_MODEL), the same
+// mechanism as the move calls — no Antigravity, no /analyze, no server round-trip.
+// Sends the round's game log, asks the model to analyze it (where Pac-Man was
+// caught/slipped, where the ghosts clustered vs spread, pincer vs gap), and reply
+// with the five delimited blocks; parsed exactly as before to overwrite the five
+// ghost notes. ~4 tries with backoff; on failure the old .md are kept (never crash).
+async function trainGhosts(logText) {
+  const currentNotes = [
+    `===ATLANTA===`, (MEMORY.atlanta || "").trim(),
+    `===BERKELEY===`, (MEMORY.berkeley || "").trim(),
+    `===CHICAGO===`, (MEMORY.chicago || "").trim(),
+    `===DELAWARE===`, (MEMORY.delaware || "").trim(),
+    `===TEAM===`, (MEMORY.team || "").trim(),
+    `===END===`,
+  ].join("\n");
+  const user = [
+    `You are the shared learning module for four ghosts (Atlanta, Berkeley, Chicago, Delaware) that cooperate to catch Pac-Man on a 14x34 maze (14 rows, 34 cols; coordinates row,col with row 0 at the top).`,
+    `A game just finished. Study the move-by-move GAME LOG below and ANALYZE it: where did Pac-Man get caught (or slip away)? Where did the ghosts cluster together vs spread out? Did a pincer close in, or did Pac-Man escape through a gap? Then REWRITE all five strategy notes so the ghosts catch Pac-Man FASTER next game.`,
+    ``,
+    `MAZE (#=wall, .=floor):`,
+    MAZE_TEXT,
+    ``,
+    `GAME LOG (each line: turn, who moved, from->to coordinates, direction, reason):`,
+    logText || "(no moves recorded)",
+    ``,
+    `CURRENT NOTES:`,
+    currentNotes,
+    ``,
+    `Write concrete, human-readable guidance in plain language about positions and directions — which way each ghost should head, how to spread out and pincer, where to cut off escape routes, how pellets pull Pac-Man. Do NOT invent fixed keyword commands. Add brief "# reason" lines explaining each idea. Each ghost note is personal to that ghost; the team note is shared coordination they all read.`,
+    `Reply EXACTLY in this delimited format and nothing else (no JSON, no code fences):`,
+    `===ATLANTA===`, `<atlanta notes>`,
+    `===BERKELEY===`, `<berkeley notes>`,
+    `===CHICAGO===`, `<chicago notes>`,
+    `===DELAWARE===`, `<delaware notes>`,
+    `===TEAM===`, `<team notes>`,
+    `===END===`,
+  ].join("\n");
+  const messages = [
+    { role: "system", content: "You improve four cooperating ghosts' strategy notes after each game so they catch Pac-Man faster. Reply only in the exact delimited format requested." },
+    { role: "user", content: user },
+  ];
+  const TRIES = 4;
+  for (let attempt = 0; attempt < TRIES; attempt++) {
+    try {
+      let md = await callModel(messages, GHOST_MODEL);   // direct Gemini call
+      if (!/===END===/i.test(md)) md += "\n===END===";   // tolerate a missing trailing marker
+      const blocks = parseLearning(md);
+      if (!Object.keys(blocks).length) throw new Error("no ghost notes parsed: " + oneLine(md));
+      const n = applyLearning(blocks);                   // overwrite the 5 ghost .md + re-render
+      console.log(`[OmegaPacman] training rewrote ${n}/5 ghost notes`);
+      logApi("Learning", `success (try ${attempt + 1}/${TRIES}) — ${n}/5 ghost notes rewritten`, false, GHOST_MODEL);
+      return;
+    } catch (e) {
+      console.log(`[OmegaPacman] training try ${attempt + 1}/${TRIES} failed: ${e.message}`);
+      logApi("Learning", `try ${attempt + 1}/${TRIES} failed: ${oneLine(e.message)}`, true, GHOST_MODEL);
+      if (attempt < TRIES - 1) await sleep(500 * Math.pow(2, attempt) + Math.random() * 400);
+    }
   }
+  logApi("Learning", `fallback — notes unchanged (all ${TRIES} Gemini tries failed)`, true, GHOST_MODEL);
 }
 
 function actorColor(name) {
