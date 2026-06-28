@@ -469,7 +469,7 @@
     <div class="card">
       <h2>Game setup</h2>
       <label class="field">How many rounds?
-        <input id="roundsInput" type="number" min="1" max="50" value="3" />
+        <input id="roundsInput" type="number" min="1" max="30" value="3" />
       </label>
       <p class="hint">Each round, the ghosts get one game to catch Pac-Man, then reflect on what happened.</p>
       <div class="row">
@@ -727,7 +727,8 @@ document.getElementById("apikeyNext").addEventListener("click", () => {
 
 // Setup screen
 document.getElementById("playBtn").addEventListener("click", () => {
-  game.rounds = Math.max(1, parseInt(document.getElementById("roundsInput").value, 10) || 1);
+  // Cap the experiment at 30 rounds max (Antigravity learning runs each round).
+  game.rounds = Math.min(30, Math.max(1, parseInt(document.getElementById("roundsInput").value, 10) || 1));
   startGame();
   showScreen("game");
 });
@@ -1115,9 +1116,10 @@ function applyLearning(blocks) {
   return n;
 }
 
+// Gemini collective ghost learning. CURRENTLY OFF — the ghosts now learn via the
+// Antigravity server (see runAntigravityLearning), which this is replaced by.
+// Kept here, unused, so it's easy to re-enable. (Pac-Man solo learning still runs.)
 // ONE learning call with the same robust retry + fallback as the move calls.
-// Logs an "Learning" API row (success / try-failed / fallback) so the run is
-// confirmable; on total failure the notes are left unchanged.
 async function learnFromGame(win) {
   const messages = [
     { role: "system", content: "You improve four cooperating ghosts' strategy notes after each game so they catch Pac-Man faster. Reply only in the exact delimited format requested." },
@@ -1429,7 +1431,6 @@ async function endGame(win) {
   setPlaying(false);
   renderGame();                                    // show the final board state
   recordMetric(win);                               // append this round to the metrics list
-  collectGameLog();                                // roll this game's MOVE log into the 10-game buffer
   const v = document.getElementById("resVerdict");
   v.textContent = win ? "VICTORY" : "DEFEAT";
   v.className = "verdict " + (win ? "win" : "lose");
@@ -1440,14 +1441,17 @@ async function endGame(win) {
   again.textContent = game.round < game.rounds ? "Next Round" : "Play Again";
   renderMetrics();
 
-  // LEARNING (co-evolution): both sides reflect on this game and rewrite their
-  // notes before the next round — Pac-Man solo and the ghosts collectively, in
-  // parallel (both on Gemini, so gated on the key). The updated notes are visible
-  // in the Memory panel when the modal opens.
-  if (apiKey()) {
-    setTurnLabel("Pac-Man & ghosts are learning…", "var(--accent)", true);
-    await Promise.all([learnFromGame(win), learnPacman(win)]);
-  }
+  // LEARNING (co-evolution) before the next round:
+  //   • Ghosts → the Antigravity server (collectGameLog → runAntigravityLearning),
+  //     which replaces the old Gemini ghost learning. Keyless; slow (1-2 min).
+  //   • Pac-Man → solo learning on Gemini (only when the key is set).
+  // Run them together; show "Antigravity analyzing…" while we wait, apply the .md
+  // when it returns, then continue. Updated notes show in the Memory panel.
+  setTurnLabel("Antigravity analyzing…", "var(--accent)", true);
+  const learnTasks = [collectGameLog()];             // ghosts via Antigravity (every GAMES_PER_BATCH games)
+  if (apiKey()) learnTasks.push(learnPacman(win));    // Pac-Man solo learning on Gemini
+  await Promise.all(learnTasks);
+
   show("resultModal", true);                        // modal over the board (no page switch)
   scheduleAutoProceed();                            // if Auto is on, advance to the next round
 }
@@ -1582,21 +1586,53 @@ const gameLog = [];   // {kind:'api'|'move', actor, msg, fallback, model?, round
 let gameCount = 0;                 // completed games this session
 let currentGameMoves = [];         // MOVE lines for the in-progress game (reset each game)
 const gameLogsBuffer = [];         // rolling window: the last N games' MOVE-log strings
-const GAMES_PER_BATCH = 10;
+const GAMES_PER_BATCH = 1;         // run Antigravity learning every N games (1 now; flip to 10 later)
+const ANTIGRAVITY_URL = "http://localhost:5000/analyze";   // local Antigravity ghost-learning server
 
 // Called once per completed game (from endGame): snapshot this game's MOVE log into
-// the rolling buffer; after every 10th game, assemble the last 10 games into one
-// clearly separated string and log it. (No server call yet — that comes next.)
-function collectGameLog() {
+// the rolling buffer; after every GAMES_PER_BATCH games, assemble the batch into one
+// clearly separated string and send it to the Antigravity server for ghost learning.
+async function collectGameLog() {
   gameCount += 1;
   gameLogsBuffer.push(currentGameMoves.length ? currentGameMoves.join("\n") : "(no moves recorded)");
-  if (gameLogsBuffer.length > GAMES_PER_BATCH) gameLogsBuffer.shift();   // keep only the last 10
+  if (gameLogsBuffer.length > GAMES_PER_BATCH) gameLogsBuffer.shift();   // keep only the last N
   if (gameCount % GAMES_PER_BATCH === 0) {
     const startNum = gameCount - gameLogsBuffer.length + 1;             // absolute game number of buffer[0]
     const assembled = gameLogsBuffer
       .map((g, i) => `=== GAME ${startNum + i} ===\n${g}`)
       .join("\n\n");
     console.log(`[OmegaPacman] ${gameCount} games completed — assembled MOVE log of the last ${gameLogsBuffer.length} games:\n\n${assembled}`);
+    await runAntigravityLearning(assembled);
+  }
+}
+
+// Ghost learning via the local Antigravity server (replaces the Gemini ghost
+// learning). POST the assembled MOVE log; the server replies with {md: "...===TEAM===
+// ===ATLANTA===...==="} which we parse (same delimited style as Gemini learning) and
+// use to overwrite the five ghost notes. Slow (1-2 min). If the server is unreachable
+// or the reply is unusable, warn and keep the existing .md — never crash.
+async function runAntigravityLearning(logText) {
+  try {
+    const res = await fetch(ANTIGRAVITY_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ log: logText }),
+    });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const data = await res.json();
+    let md = data && data.md;
+    if (!md) throw new Error("empty 'md' in response");
+    // parseLearning expects a trailing marker after the last block; the server may
+    // omit ===END===, so add it if absent (reusing the existing delimited parser).
+    if (!/===END===/i.test(md)) md += "\n===END===";
+    const blocks = parseLearning(md);
+    if (!Object.keys(blocks).length) throw new Error("no ghost notes parsed from md");
+    const n = applyLearning(blocks);                 // overwrite the 5 ghost .md + re-render
+    console.log(`[OmegaPacman] Antigravity rewrote ${n}/5 ghost notes`);
+    logApi("Antigravity", `success — ${n}/5 ghost notes rewritten`, false, "antigravity");
+  } catch (e) {
+    console.warn(`[OmegaPacman] Antigravity unreachable/failed — keeping old .md: ${e.message}`);
+    logApi("Antigravity", `unreachable/failed — keeping old .md: ${oneLine(e.message)}`, true, "antigravity");
   }
 }
 
