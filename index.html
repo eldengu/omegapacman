@@ -303,13 +303,27 @@
   #autoBtn.on:hover { background: #fff04d; }
 
   /* memory panels sit BELOW the maze, side by side: ghost memory LEFT, team RIGHT */
-  #memorypane, #replaymemorypane {
+  #memorypane, #replaymemorypane, #replaynarrative {
     width: 100%;
     max-width: var(--board-w);  /* line up under the maze */
     display: flex;
     flex-direction: row;
     align-items: flex-start;
     gap: 14px;
+  }
+  /* narrative boxes (replay analysis) — taller + readable prose, not monospace */
+  .narrbox {
+    height: auto;
+    min-height: 90px;
+    max-height: 220px;
+    font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+    white-space: pre-wrap;
+    color: var(--ink);
+  }
+  #replayGameNarr, #replayRoundNarr {
+    font-family: inherit;       /* prose, not monospace */
+    font-size: 13.5px;
+    line-height: 1.55;
   }
   .mempanel {
     flex: 1;
@@ -640,6 +654,22 @@
             <h3>Team memory <span class="memsub">(going into this round)</span></h3>
           </div>
           <pre id="replayTeamMd" class="mdbox"></pre>
+        </div>
+      </div>
+
+      <!-- StarCraft-style replay analysis: overall game arc + this round's story -->
+      <div id="replaynarrative">
+        <div class="mempanel">
+          <div class="memtop">
+            <h3>How the strategy evolved <span class="memsub">(this game)</span></h3>
+          </div>
+          <pre id="replayGameNarr" class="mdbox narrbox"></pre>
+        </div>
+        <div class="mempanel">
+          <div class="memtop">
+            <h3>This round <span class="memsub" id="replayRoundNarrLabel"></span></h3>
+          </div>
+          <pre id="replayRoundNarr" class="mdbox narrbox"></pre>
         </div>
       </div>
     </div>
@@ -1946,9 +1976,17 @@ document.getElementById("settingsCancel").addEventListener("click", () => show("
 // ===================================================================
 const LOAD_ROUND_URL  = SERVER_BASE + "/load_round";    // GET ?game=N&round=M -> {game_log,result,mds}
 const LIST_ROUNDS_URL = SERVER_BASE + "/list_rounds";   // optional dropdown source
+// Narrative (replay analysis) cache — generated once, then saved to the experiment
+// folder so it's already there next time (no regeneration):
+//   GET  /load_narrative?game=N[&round=M] -> {narrative} (404/empty if not cached)
+//   POST /save_narrative  {game, round|null, narrative}  -> saves narrative.md
+const LOAD_NARRATIVE_URL = SERVER_BASE + "/load_narrative";
+const SAVE_NARRATIVE_URL = SERVER_BASE + "/save_narrative";
+const NARRATIVE_MODEL = "gemini-3.1-flash-lite";   // narratives are generated with 3.1-flash-lite
 const REPLAY_DELAY = 650;   // ms per turn (human-watchable, 0.5–0.8s)
 const REPLAY_GHOSTS = ["Atlanta", "Berkeley", "Chicago", "Delaware"];
-const replay = { frames: [], idx: 0, playing: false, timer: null, result: null, mds: null, activeMd: "atlanta" };
+const replay = { frames: [], idx: 0, playing: false, timer: null, result: null, mds: null, activeMd: "atlanta",
+                 game: null, round: null, narrGame: null };
 
 // Build the replay board cells (same maze + thin neon-line walls as live play).
 function buildReplayBoardCells() {
@@ -2086,6 +2124,7 @@ async function loadAndReplay() {
     const res = await fetch(`${LOAD_ROUND_URL}?game=${game}&round=${round}`);
     if (!res.ok) throw new Error("HTTP " + res.status);
     const data = await res.json();
+    replay.game = game; replay.round = round;
     replay.result = data.result || null;
     replay.mds = data.mds || {};
     replay.frames = buildReplayFrames(parseReplayLog(data.game_log || ""));
@@ -2093,9 +2132,115 @@ async function loadAndReplay() {
     renderReplayMds();
     if (replay.frames.length > 1) { renderReplayFrame(); setReplayPlaying(true); }
     else { drawReplayFrame(replay.frames[0] || null); setReplayLabel(`Game ${game} round ${round}: no moves to replay.`, "var(--muted)"); }
+    loadNarratives(game, round, data);                 // StarCraft-style analysis (cached, async)
   } catch (e) {
     console.warn("[OmegaPacman] load_round failed:", e.message);
     setReplayLabel(`Couldn't load game ${game} round ${round} — ${escapeHtml(e.message)} (is the server running?)`, "var(--muted)");
+  }
+}
+
+// ---- replay narratives (StarCraft-style analysis) -----------------------
+// Cache-first: try /load_narrative; only generate with gemini-3.1-flash-lite on a
+// miss, then POST /save_narrative so it's there next time (no regeneration). Both
+// the cache endpoints and generation degrade gracefully (the playback never waits).
+async function loadCachedNarrative(game, round) {
+  try {
+    const q = round == null ? `?game=${game}` : `?game=${game}&round=${round}`;
+    const res = await fetch(LOAD_NARRATIVE_URL + q);
+    if (!res.ok) return null;
+    const data = await res.json();
+    const n = data && (data.narrative || data.md);
+    return (typeof n === "string" && n.trim()) ? n.trim() : null;
+  } catch (e) { return null; }
+}
+async function saveCachedNarrative(game, round, narrative) {
+  try {
+    await fetch(SAVE_NARRATIVE_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ game, round: round == null ? null : round, narrative }),
+    });
+  } catch (e) { /* caching is best-effort */ }
+}
+async function genRoundNarrative(game, round, data) {
+  const result = data.result || {}, mds = data.mds || {};
+  const outcome = result.caught
+    ? `The ghosts CAUGHT Pac-Man on turn ${result.turns} (score ${result.score}).`
+    : `Pac-Man SURVIVED all ${MAX_TURN} turns and escaped (score ${result.score}).`;
+  const user = [
+    `You are a replay analyst (like a StarCraft caster) narrating ONE round of a Pac-Man-vs-ghosts game on a 14x34 maze (4 ghosts hunt Pac-Man; they win by stepping onto his cell).`,
+    `Write a SHORT, vivid story (2–4 sentences) of what happened THIS round: how Pac-Man evaded, what the ghosts tried (e.g. converging, cornering, missing), and WHY he was caught or got away. Reference concrete positions/movements from the log. Plain prose only, no headers, no lists.`,
+    ``,
+    `OUTCOME: ${outcome}`,
+    ``,
+    `GHOST TEAM STRATEGY going into this round (team.md):`,
+    (mds.team || "(none)").toString().trim(),
+    ``,
+    `MOVE LOG (turn, who moved, from->to coords, direction, reason):`,
+    (data.game_log || "(no moves)").toString().trim(),
+  ].join("\n");
+  const messages = [
+    { role: "system", content: "You are a concise, vivid game-replay analyst. Reply with prose only." },
+    { role: "user", content: user },
+  ];
+  return (await callModel(messages, NARRATIVE_MODEL)).trim();
+}
+async function genGameNarrative(game) {
+  let rounds = (await fetchRoundList())
+    .filter(it => it.game == null || Number(it.game) === game)
+    .map(it => Number(it.round)).filter(n => Number.isFinite(n));
+  rounds = [...new Set(rounds)].sort((a, b) => a - b);
+  const summaries = [];
+  for (const r of rounds) {
+    try {
+      const res = await fetch(`${LOAD_ROUND_URL}?game=${game}&round=${r}`);
+      if (!res.ok) continue;
+      const d = await res.json();
+      const result = d.result || {};
+      const team = (((d.mds || {}).team) || "").toString().replace(/\s+/g, " ").trim().slice(0, 280);
+      summaries.push(`Round ${r}: ${result.caught ? "CAUGHT on turn " + result.turns : "Pac-Man ESCAPED (" + MAX_TURN + " turns)"}, score ${result.score}. Team strategy going in: ${team || "(empty)"}`);
+    } catch (e) { /* skip unreadable round */ }
+  }
+  const user = [
+    `You are a replay analyst summarizing how the ghost AI's strategy EVOLVED across a whole game (a sequence of rounds) of Pac-Man-vs-ghosts. After each round the ghosts rewrite their shared team strategy, so it changes over time.`,
+    `Write a SHORT narrative (3–5 sentences) of the strategy ARC: what the ghosts did in EARLY rounds vs LATER rounds, when key ideas (corner-herding, pincering, converging from multiple sides) emerged, and whether catching got faster (turns dropping) or stalled/regressed. Plain prose only, no headers, no lists.`,
+    ``,
+    `PER-ROUND SUMMARIES (in order):`,
+    summaries.length ? summaries.join("\n") : "(no rounds saved for this game)",
+  ].join("\n");
+  const messages = [
+    { role: "system", content: "You are a concise, insightful game-replay analyst. Reply with prose only." },
+    { role: "user", content: user },
+  ];
+  return (await callModel(messages, NARRATIVE_MODEL)).trim();
+}
+// Orchestrate both narratives for the opened game/round (async, non-blocking).
+function loadNarratives(game, round, roundData) {
+  // per-round story
+  document.getElementById("replayRoundNarrLabel").textContent = `(round ${round})`;
+  const rEl = document.getElementById("replayRoundNarr");
+  rEl.textContent = "Generating narrative…";
+  (async () => {
+    let n = await loadCachedNarrative(game, round);
+    if (!n) {
+      try { n = await genRoundNarrative(game, round, roundData); await saveCachedNarrative(game, round, n); }
+      catch (e) { n = `(narrative unavailable — ${e.message})`; }
+    }
+    if (replay.game === game && replay.round === round) rEl.textContent = n;   // ignore stale results
+  })();
+  // overall game arc — generate once per game
+  if (replay.narrGame !== game) {
+    replay.narrGame = game;
+    const gEl = document.getElementById("replayGameNarr");
+    gEl.textContent = "Generating narrative…";
+    (async () => {
+      let n = await loadCachedNarrative(game, null);
+      if (!n) {
+        try { n = await genGameNarrative(game); await saveCachedNarrative(game, null, n); }
+        catch (e) { n = `(narrative unavailable — ${e.message})`; }
+      }
+      if (replay.narrGame === game) gEl.textContent = n;
+    })();
   }
 }
 
@@ -2132,9 +2277,13 @@ function enterReplay() {
   buildReplayBoardCells();
   drawReplayFrame(null);
   replay.frames = []; replay.idx = 0; replay.mds = null; replay.result = null;
+  replay.game = null; replay.round = null; replay.narrGame = null;
   document.getElementById("replayResult").textContent = "";
   setReplayLabel("Pick a game &amp; round, then Load.", "var(--muted)");
   renderReplayMds();
+  document.getElementById("replayGameNarr").textContent = "";
+  document.getElementById("replayRoundNarr").textContent = "";
+  document.getElementById("replayRoundNarrLabel").textContent = "";
   populateReplayList();
 }
 
