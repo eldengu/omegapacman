@@ -143,8 +143,8 @@
   .attract-foot { color: #55598c; font-size: 11px; margin-top: 18px; }
 
   /* ===================== GAME SCREEN ===================== */
-  #screen-game { padding: 18px 22px; }
-  #gametop {
+  #screen-game, #screen-replay { padding: 18px 22px; }
+  #gametop, #replaytop {
     width: 100%;
     max-width: 1100px;
     display: flex;
@@ -155,11 +155,16 @@
     border-radius: 12px;
     padding: 12px 16px;
   }
-  #gametop .stat { font-size: 14px; color: var(--muted); }
+  #replaytop { gap: 12px; flex-wrap: wrap; }
+  .rfield { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
+  .rfield input[type="number"] { width: 72px; padding: 7px 9px; }
+  #replaytop select { font: inherit; padding: 7px 9px; background: var(--floor); color: var(--ink); border: 1px solid var(--edge); border-radius: 8px; }
+  #replayResult { color: var(--accent); font-weight: bold; }
+  #gametop .stat, #replaytop .stat { font-size: 14px; color: var(--muted); }
   #gametop .stat b { color: var(--accent); font-size: 18px; margin-left: 4px; }
-  #gametop .spacer { flex: 1; }
+  #gametop .spacer, #replaytop .spacer { flex: 1; }
 
-  #turnlabel {
+  #turnlabel, #replaylabel {
     width: 100%;
     max-width: 1100px;
     min-height: 64px;
@@ -191,7 +196,7 @@
   }
 
   /* Top-to-bottom layout: status (above) -> wide maze -> memory panels row. */
-  #gamerow {
+  #gamerow, #replayrow {
     width: 100%;
     max-width: 1100px;
     display: flex;
@@ -199,9 +204,9 @@
     gap: 20px;
     align-items: center;
   }
-  #boardpane { display: flex; flex-direction: column; gap: 12px; align-items: center; }
+  #boardpane, #replayboardpane { display: flex; flex-direction: column; gap: 12px; align-items: center; }
 
-  #board {
+  #board, #replayBoard {
     width: var(--board-w);
     height: var(--board-h);
     display: grid;
@@ -281,7 +286,7 @@
   #autoBtn.on:hover { background: #fff04d; }
 
   /* memory panels sit BELOW the maze, side by side: ghost memory LEFT, team RIGHT */
-  #memorypane {
+  #memorypane, #replaymemorypane {
     width: 100%;
     max-width: var(--board-w);  /* line up under the maze */
     display: flex;
@@ -491,6 +496,9 @@
         <button data-go="apikey">Back</button>
         <button class="primary" id="playBtn">Play</button>
       </div>
+      <div class="row">
+        <button id="replayEnterBtn" title="Replay a saved round (no LLM calls)">▶ Replay saved rounds</button>
+      </div>
     </div>
   </section>
 
@@ -546,6 +554,51 @@
             <h3>Team memory <span class="memsub">(shared — always visible)</span></h3>
           </div>
           <pre id="teamMd" class="mdbox clickbox" title="Click to read the full strategy"></pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ SCREEN 5: REPLAY (pure playback of a saved round) ============ -->
+  <section id="screen-replay" class="screen">
+    <div id="replaytop">
+      <div class="stat">Replay</div>
+      <label class="rfield">Game <input id="replayGame" type="number" min="1" value="1" /></label>
+      <label class="rfield">Round <input id="replayRound" type="number" min="1" value="1" /></label>
+      <select id="replayPick" class="hidden" title="Saved rounds"></select>
+      <button id="replayLoadBtn" class="small primary">Load</button>
+      <button id="replayPlayBtn" class="small">&#9654; Play</button>
+      <button id="replayRestartBtn" class="small">&#8635; Restart</button>
+      <div class="stat" id="replayResult"></div>
+      <div class="spacer"></div>
+      <button data-go="setup" class="small">Back</button>
+    </div>
+
+    <div id="replaylabel">Pick a game &amp; round, then Load.</div>
+
+    <div id="replayrow">
+      <div id="replayboardpane">
+        <div id="replayBoard"></div>
+      </div>
+      <div id="replaymemorypane">
+        <div class="mempanel">
+          <div class="memtop">
+            <h3>Strategy going in <span class="memsub">(.md for that round)</span></h3>
+            <div class="memtabs" id="replayTabs">
+              <button class="memtab" data-ghost="pacman"   style="--accent:var(--pac)">Pacman</button>
+              <button class="memtab" data-ghost="atlanta"  style="--accent:var(--atlanta)">Atlanta</button>
+              <button class="memtab" data-ghost="berkeley" style="--accent:var(--berkeley)">Berkeley</button>
+              <button class="memtab" data-ghost="chicago"  style="--accent:var(--chicago)">Chicago</button>
+              <button class="memtab" data-ghost="delaware" style="--accent:var(--delaware)">Delaware</button>
+            </div>
+          </div>
+          <pre id="replayMd" class="mdbox"></pre>
+        </div>
+        <div class="mempanel">
+          <div class="memtop">
+            <h3>Team memory <span class="memsub">(going into this round)</span></h3>
+          </div>
+          <pre id="replayTeamMd" class="mdbox"></pre>
         </div>
       </div>
     </div>
@@ -1784,6 +1837,227 @@ document.getElementById("settingsCancel").addEventListener("click", () => show("
   const ov = document.getElementById(id);
   ov.addEventListener("click", e => { if (e.target === ov) show(id, false); });
 });
+
+// ===================================================================
+// REPLAY MODE — pure playback of a saved round's move log (NO LLM calls).
+// Fetches a saved round from the server's /load_round and animates Pac-Man +
+// the ghosts turn-by-turn from the saved game_log, alongside that round's .md.
+// Fully separate from live play (own board #replayBoard + own state).
+// ===================================================================
+const LOAD_ROUND_URL  = SERVER_BASE + "/load_round";    // GET ?game=N&round=M -> {game_log,result,mds}
+const LIST_ROUNDS_URL = SERVER_BASE + "/list_rounds";   // optional dropdown source
+const REPLAY_DELAY = 650;   // ms per turn (human-watchable, 0.5–0.8s)
+const REPLAY_GHOSTS = ["Atlanta", "Berkeley", "Chicago", "Delaware"];
+const replay = { frames: [], idx: 0, playing: false, timer: null, result: null, mds: null, activeMd: "atlanta" };
+
+// Build the replay board cells (same maze + thin neon-line walls as live play).
+function buildReplayBoardCells() {
+  const el = document.getElementById("replayBoard");
+  el.innerHTML = "";
+  for (let r = 0; r < ROWS; r++)
+    for (let c = 0; c < COLS; c++) {
+      const d = document.createElement("div");
+      let cls = "cell";
+      if (MAZE[r][c] === 1) {
+        cls += " wall";
+        if (isFloor(r - 1, c)) cls += " wt";
+        if (isFloor(r + 1, c)) cls += " wb";
+        if (isFloor(r, c - 1)) cls += " wl";
+        if (isFloor(r, c + 1)) cls += " wr";
+      }
+      d.className = cls;
+      d.id = `rcell-${r}-${c}`;
+      el.appendChild(d);
+    }
+}
+function drawReplayFrame(f) {
+  document.querySelectorAll("#replayBoard .cell").forEach(c => { c.innerHTML = ""; });
+  if (!f) return;
+  for (const k of f.pellets) {
+    const cell = document.getElementById(`rcell-${k.replace(",", "-")}`);
+    if (cell) { const dot = document.createElement("div"); dot.className = "pellet"; cell.appendChild(dot); }
+  }
+  f.ghosts.forEach((p, i) => {
+    if (!p) return;
+    const cell = document.getElementById(`rcell-${p.r}-${p.c}`);
+    if (!cell) return;
+    const el = document.createElement("div");
+    el.className = "ghost"; el.style.background = GHOSTS[i].color; el.title = GHOSTS[i].name;
+    cell.appendChild(el);
+  });
+  if (f.pac) {
+    const cell = document.getElementById(`rcell-${f.pac.r}-${f.pac.c}`);
+    if (cell) { const pe = document.createElement("div"); pe.className = "pac"; cell.appendChild(pe); }
+  }
+}
+
+// Parse a saved game_log ("T<turn> <Actor> (r,c)->(r,c) <dir> · <reason>") into events.
+function parseReplayLog(text) {
+  const re = /^T(\d+)\s+(Pac-Man|Atlanta|Berkeley|Chicago|Delaware)\s+\((\d+),(\d+)\)\s*(?:→|->)\s*\((\d+),(\d+)\)\s+(up|down|left|right|stay)/i;
+  const events = [];
+  for (const line of (text || "").split(/\r?\n/)) {
+    const m = line.trim().match(re);
+    if (m) events.push({ turn: +m[1], actor: m[2], to: { r: +m[5], c: +m[6] }, from: { r: +m[3], c: +m[4] } });
+  }
+  return events;
+}
+// Reconstruct one board frame per turn (plus the initial state) from the events.
+function buildReplayFrames(events) {
+  const pos = {};
+  for (const a of ["Pac-Man", ...REPLAY_GHOSTS]) {
+    const first = events.find(e => e.actor === a);
+    if (first) pos[a] = { ...first.from };
+  }
+  const occ = new Set(Object.values(pos).map(p => keyOf(p.r, p.c)));
+  let pellets = new Set();
+  for (let r = 0; r < ROWS; r++)
+    for (let c = 0; c < COLS; c++)
+      if (isFloor(r, c) && !occ.has(keyOf(r, c))) pellets.add(keyOf(r, c));
+  const snap = () => ({
+    pac: pos["Pac-Man"] ? { ...pos["Pac-Man"] } : null,
+    ghosts: REPLAY_GHOSTS.map(a => pos[a] ? { ...pos[a] } : null),
+    pellets: new Set(pellets),
+  });
+  const frames = [snap()];                 // frame 0 = start positions
+  let curTurn = null;
+  for (const e of events) {
+    if (curTurn !== null && e.turn !== curTurn) frames.push(snap());   // end of previous turn
+    curTurn = e.turn;
+    pos[e.actor] = { ...e.to };
+    if (e.actor === "Pac-Man") pellets.delete(keyOf(e.to.r, e.to.c));  // eat pellet on landing
+  }
+  if (curTurn !== null) frames.push(snap());   // last turn's end state
+  return frames;
+}
+
+function setReplayLabel(html, color) {
+  const el = document.getElementById("replaylabel");
+  el.style.color = color || "var(--ink)";
+  el.innerHTML = html;
+}
+function renderReplayFrame() {
+  drawReplayFrame(replay.frames[replay.idx]);
+  const total = Math.max(0, replay.frames.length - 1);
+  setReplayLabel(replay.idx === 0
+    ? `Replay — start &nbsp;(turn 0 / ${total})`
+    : `Replay — turn ${replay.idx} / ${total}`, "var(--accent)");
+}
+function showReplayResult() {
+  const r = replay.result || {};
+  const turns = (r.turns != null) ? r.turns : Math.max(0, replay.frames.length - 1);
+  const score = (r.score != null) ? r.score : "?";
+  document.getElementById("replayResult").textContent = r.caught
+    ? `CAUGHT · turn ${turns} · score ${score}`
+    : `ESCAPED · survived ${turns} · score ${score}`;
+}
+function setReplayPlaying(on) {
+  replay.playing = on;
+  document.getElementById("replayPlayBtn").innerHTML = on ? "&#10073;&#10073; Pause" : "&#9654; Play";
+  if (replay.timer) { clearTimeout(replay.timer); replay.timer = null; }
+  if (on && replay.frames.length > 1) replay.timer = setTimeout(replayTick, REPLAY_DELAY);
+}
+function replayTick() {
+  replay.timer = null;
+  // stop if we've navigated away from the replay screen
+  if (!document.getElementById("screen-replay").classList.contains("active")) { replay.playing = false; return; }
+  if (!replay.playing) return;
+  if (replay.idx >= replay.frames.length - 1) { setReplayPlaying(false); showReplayResult(); return; }
+  replay.idx += 1;
+  renderReplayFrame();
+  if (replay.idx >= replay.frames.length - 1) { setReplayPlaying(false); showReplayResult(); return; }
+  replay.timer = setTimeout(replayTick, REPLAY_DELAY);
+}
+
+function renderReplayMds() {
+  const mds = replay.mds || {};
+  document.getElementById("replayMd").textContent = mds[replay.activeMd] || "(no .md for this round)";
+  document.getElementById("replayTeamMd").textContent = mds.team || "(no team.md for this round)";
+  document.querySelectorAll("#replayTabs .memtab").forEach(t =>
+    t.classList.toggle("active", t.dataset.ghost === replay.activeMd));
+}
+
+async function loadAndReplay() {
+  const game = Math.max(1, parseInt(document.getElementById("replayGame").value, 10) || 1);
+  const round = Math.max(1, parseInt(document.getElementById("replayRound").value, 10) || 1);
+  setReplayPlaying(false);
+  document.getElementById("replayResult").textContent = "";
+  setReplayLabel(`Loading game ${game} round ${round}…`, "var(--muted)");
+  try {
+    const res = await fetch(`${LOAD_ROUND_URL}?game=${game}&round=${round}`);
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const data = await res.json();
+    replay.result = data.result || null;
+    replay.mds = data.mds || {};
+    replay.frames = buildReplayFrames(parseReplayLog(data.game_log || ""));
+    replay.idx = 0;
+    renderReplayMds();
+    if (replay.frames.length > 1) { renderReplayFrame(); setReplayPlaying(true); }
+    else { drawReplayFrame(replay.frames[0] || null); setReplayLabel(`Game ${game} round ${round}: no moves to replay.`, "var(--muted)"); }
+  } catch (e) {
+    console.warn("[OmegaPacman] load_round failed:", e.message);
+    setReplayLabel(`Couldn't load game ${game} round ${round} — ${escapeHtml(e.message)} (is the server running?)`, "var(--muted)");
+  }
+}
+
+// Best-effort dropdown from /list_rounds (defensive about the response shape).
+async function populateReplayList() {
+  const sel = document.getElementById("replayPick");
+  try {
+    const res = await fetch(LIST_ROUNDS_URL);
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const data = await res.json();
+    let items = [];
+    if (Array.isArray(data)) items = data;
+    else if (data && Array.isArray(data.rounds)) items = data.rounds;
+    else if (data && typeof data === "object") {
+      for (const [g, rs] of Object.entries(data)) {
+        const gn = parseInt(String(g).replace(/\D/g, ""), 10);
+        if (Array.isArray(rs)) for (const rr of rs) items.push({ game: gn, round: rr });
+      }
+    }
+    const norm = items
+      .map(it => Array.isArray(it) ? { game: it[0], round: it[1] } : { game: it.game, round: it.round })
+      .filter(it => it.game != null && it.round != null);
+    if (!norm.length) throw new Error("empty");
+    sel.innerHTML = `<option value="">— saved rounds —</option>` +
+      norm.map(it => `<option value="${it.game}:${it.round}">game ${it.game} · round ${it.round}</option>`).join("");
+    sel.classList.remove("hidden");
+  } catch (e) {
+    sel.classList.add("hidden");   // no list endpoint — just use the Game/Round inputs
+  }
+}
+
+function enterReplay() {
+  showScreen("replay");
+  buildReplayBoardCells();
+  drawReplayFrame(null);
+  replay.frames = []; replay.idx = 0; replay.mds = null; replay.result = null;
+  document.getElementById("replayResult").textContent = "";
+  setReplayLabel("Pick a game &amp; round, then Load.", "var(--muted)");
+  renderReplayMds();
+  populateReplayList();
+}
+
+document.getElementById("replayEnterBtn").addEventListener("click", enterReplay);
+document.getElementById("replayLoadBtn").addEventListener("click", loadAndReplay);
+document.getElementById("replayPlayBtn").addEventListener("click", () => {
+  if (!replay.frames.length) return;
+  if (replay.idx >= replay.frames.length - 1) { replay.idx = 0; renderReplayFrame(); document.getElementById("replayResult").textContent = ""; }
+  setReplayPlaying(!replay.playing);
+});
+document.getElementById("replayRestartBtn").addEventListener("click", () => {
+  if (!replay.frames.length) return;
+  replay.idx = 0; renderReplayFrame(); document.getElementById("replayResult").textContent = ""; setReplayPlaying(true);
+});
+document.getElementById("replayPick").addEventListener("change", e => {
+  const v = e.target.value; if (!v) return;
+  const [g, r] = v.split(":");
+  document.getElementById("replayGame").value = g;
+  document.getElementById("replayRound").value = r;
+  loadAndReplay();
+});
+document.querySelectorAll("#replayTabs .memtab").forEach(tab =>
+  tab.addEventListener("click", () => { replay.activeMd = tab.dataset.ghost; renderReplayMds(); }));
 
 // ---- boot ---------------------------------------------------------------
 showScreen("start");
