@@ -673,6 +673,7 @@ const MAZE_TEXT = MAZE_ASCII.join("\n");
 const SERVER_BASE = "http://localhost:5000";
 const PACMAN_MOVE_URL = SERVER_BASE + "/pacman_move";   // {maze,pacman,ghosts,legal,rule} -> {move}
 const GHOST_MOVE_URL  = SERVER_BASE + "/ghost_move";    // {maze,name,pos,pacman,others,legal,skill,team} -> {move}
+const SAVE_ROUND_URL  = SERVER_BASE + "/save_round";    // {game,round,game_log,result,mds} (fire-and-forget)
 const PACMAN_MODEL = "gemini-3.5-flash";   // served by the local Vertex server (log label)
 const GHOST_MODEL  = "gemini-3.5-flash";   // served by the local Vertex server (log label)
 
@@ -1301,6 +1302,7 @@ function startRound(roundNum) {
       if (isFloor(r, c) && !occupied(r, c)) game.pellets.add(keyOf(r, c));
   game.transcript = [];                   // fresh game log for this round's learning
   currentGameMoves = [];                  // fresh per-game MOVE buffer (rolling 10-game window)
+  roundStartMds = snapshotMds();          // capture the .md going INTO this round (for /save_round)
   history = [];
   setPlaying(false);
   buildBoard();
@@ -1470,6 +1472,7 @@ async function endGame(win) {
   setPlaying(false);
   renderGame();                                    // show the final board state
   recordMetric(win);                               // append this round to the metrics list
+  saveRound(win);                                  // fire-and-forget POST to /save_round (before learning rewrites .md)
   const v = document.getElementById("resVerdict");
   v.textContent = win ? "VICTORY" : "DEFEAT";
   v.className = "verdict " + (win ? "win" : "lose");
@@ -1634,6 +1637,57 @@ let currentGameMoves = [];         // MOVE lines for the in-progress game (reset
 const gameLogsBuffer = [];         // rolling window: the last N games' MOVE-log strings
 const GAMES_PER_BATCH = 1;         // run Antigravity learning every N games (1 now; flip to 10 later)
 const ANTIGRAVITY_URL = "http://localhost:5000/analyze";   // local Antigravity ghost-learning server
+
+// ---- per-round experiment saving (POST /save_round, fire-and-forget) -----
+// "game" is a session number bumped once per page load (persisted in localStorage
+// so it differs across loads). "round" is a session-wide counter over completed
+// rounds, starting at 1. roundStartMds holds the five ghost/pacman .md as they were
+// AT THE START of the current round (the strategies going into it) — captured in
+// startRound, before the end-of-round Antigravity learning rewrites them.
+const SESSION_NUMBER = (() => {
+  try {
+    const n = (parseInt(localStorage.getItem("omega_session") || "0", 10) || 0) + 1;
+    localStorage.setItem("omega_session", String(n));
+    return n;
+  } catch (e) { return 1; }        // localStorage unavailable
+})();
+let roundCounter = 0;              // completed rounds this session (1-based after the first round)
+let roundStartMds = null;          // {pacman,atlanta,berkeley,chicago,delaware,team} at round start
+
+function snapshotMds() {
+  return {
+    pacman:   MEMORY.pacman   || "",
+    atlanta:  MEMORY.atlanta  || "",
+    berkeley: MEMORY.berkeley || "",
+    chicago:  MEMORY.chicago  || "",
+    delaware: MEMORY.delaware || "",
+    team:     MEMORY.team     || "",
+  };
+}
+
+// Fire-and-forget save of a completed round to the server. Never blocks gameplay;
+// just logs a warning if the server is unreachable. Uses the START-of-round .md
+// snapshot (the strategies that went into the round, before this round's learning).
+function saveRound(win) {
+  roundCounter += 1;
+  const payload = {
+    game: SESSION_NUMBER,
+    round: roundCounter,
+    game_log: currentGameMoves.length ? currentGameMoves.join("\n") : "(no moves recorded)",
+    result: { caught: !!win, turns: win ? game.turn : MAX_TURN, score: game.score },
+    mds: roundStartMds || snapshotMds(),
+  };
+  fetch(SAVE_ROUND_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  }).then(res => {
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    console.log(`[OmegaPacman] saved game ${SESSION_NUMBER} round ${roundCounter}`);
+  }).catch(e => {
+    console.warn(`[OmegaPacman] save_round failed (game ${SESSION_NUMBER} round ${roundCounter}) — ${e.message}`);
+  });
+}
 
 // Called once per completed game (from endGame): snapshot this game's MOVE log into
 // the rolling buffer; after every GAMES_PER_BATCH games, assemble the batch into one
