@@ -2162,25 +2162,39 @@ document.querySelectorAll("#replayTabs .memtab").forEach(tab =>
 // SESSION RESULTS — a table of every saved round for THIS session.
 // Uses /list_rounds for the round list, then /load_round for each round's result.
 // ===================================================================
-// Normalize the (defensively-shaped) /list_rounds response into [{game, round}].
+// Normalize the /list_rounds response into [{game, round}] as NUMBERS. The server
+// returns FOLDER NAMES, e.g. {"game5": ["round1","round2"]}, so both the "gameN"
+// keys and the "roundM" values are strings with the number embedded — extract the
+// digits (numOf) rather than passing "round1" through (Number("round1") is NaN).
+function numOf(x) {
+  if (typeof x === "number") return Number.isFinite(x) ? x : null;
+  const m = String(x == null ? "" : x).match(/\d+/);
+  return m ? parseInt(m[0], 10) : null;
+}
 async function fetchRoundList() {
   const res = await fetch(LIST_ROUNDS_URL);
   if (!res.ok) throw new Error("HTTP " + res.status);
   const data = await res.json();
-  let items = [];
-  if (Array.isArray(data)) items = data;
-  else if (data && Array.isArray(data.rounds)) items = data.rounds;
-  else if (data && typeof data === "object") {
-    for (const [g, rs] of Object.entries(data)) {       // {gameN: [rounds...]}
-      const gn = parseInt(String(g).replace(/\D/g, ""), 10);
-      if (Array.isArray(rs)) for (const rr of rs) items.push({ game: gn, round: rr });
+  const out = [];
+  const pushItem = (g, r) => out.push({ game: numOf(g), round: numOf(r) });
+  if (Array.isArray(data)) {
+    for (const it of data) {
+      if (Array.isArray(it)) pushItem(it[0], it[1]);
+      else if (it && typeof it === "object") pushItem(it.game, it.round);
+      else pushItem(null, it);                         // flat ["round1", ...] or [1, ...]
+    }
+  } else if (data && Array.isArray(data.rounds)) {
+    for (const it of data.rounds) {
+      if (it && typeof it === "object") pushItem(it.game, it.round);
+      else pushItem(null, it);
+    }
+  } else if (data && typeof data === "object") {
+    for (const [g, rs] of Object.entries(data)) {       // {"game5": ["round1","round2"]}
+      if (Array.isArray(rs)) for (const rr of rs) pushItem(g, rr);
+      else pushItem(g, rs);
     }
   }
-  return items.map(it => {
-    if (Array.isArray(it)) return { game: it[0], round: it[1] };
-    if (typeof it === "number" || typeof it === "string") return { game: null, round: Number(it) };
-    return { game: it.game, round: it.round };
-  }).filter(it => it.round != null);
+  return out.filter(it => it.round != null);
 }
 
 function renderResultsTable(rows) {
