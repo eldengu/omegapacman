@@ -17,11 +17,11 @@
     --wall-edge: #7d96ff;
     --floor: #05051a;
     --cell: 40px;
-    --cols: 16;
-    --rows: 10;
-    /* outer box = cells + (count-1) gaps(2px) + padding(6px*2). 16 cols -> +42px, 10 rows -> +30px */
-    --board-w: calc(var(--cell) * 16 + 42px);
-    --board-h: calc(var(--cell) * 10 + 30px);
+    --cols: 20;
+    --rows: 8;
+    /* outer box = cells + (count-1) gaps(2px) + padding(6px*2). 20 cols -> +50px, 8 rows -> +26px */
+    --board-w: calc(var(--cell) * 20 + 50px);
+    --board-h: calc(var(--cell) * 8 + 26px);
     --membox-h: 170px;   /* fixed memory-box height so tabs don't resize the panel */
     /* entity colors */
     --pac: #ffe000;
@@ -205,8 +205,8 @@
     width: var(--board-w);
     height: var(--board-h);
     display: grid;
-    grid-template-columns: repeat(16, var(--cell));
-    grid-template-rows: repeat(10, var(--cell));
+    grid-template-columns: repeat(20, var(--cell));
+    grid-template-rows: repeat(8, var(--cell));
     gap: 2px;
     background: #000;
     padding: 6px;
@@ -620,36 +620,35 @@
 // ---- world data ---------------------------------------------------------
 const GHOSTS = [
   { key: "atlanta",  name: "Atlanta",  color: "var(--atlanta)",  pos: { r: 1, c: 1 } },
-  { key: "berkeley", name: "Berkeley", color: "var(--berkeley)", pos: { r: 1, c: 8 } },
-  { key: "chicago",  name: "Chicago",  color: "var(--chicago)",  pos: { r: 8, c: 1 } },
-  { key: "delaware", name: "Delaware", color: "var(--delaware)", pos: { r: 8, c: 8 } },
+  { key: "berkeley", name: "Berkeley", color: "var(--berkeley)", pos: { r: 1, c: 18 } },
+  { key: "chicago",  name: "Chicago",  color: "var(--chicago)",  pos: { r: 6, c: 1 } },
+  { key: "delaware", name: "Delaware", color: "var(--delaware)", pos: { r: 6, c: 18 } },
 ];
-const PACMAN = { pos: { r: 5, c: 8 } };
+const PACMAN = { pos: { r: 4, c: 10 } };
 // Fixed start positions, reset at the start of every round (Pac-Man centre, ghosts
-// in the four interior corners of the wide grid).
+// in the four interior corners of the low-wide grid).
 const START = {
-  pacman: { r: 5, c: 8 },
-  ghosts: [ { r: 1, c: 1 }, { r: 1, c: 14 }, { r: 8, c: 1 }, { r: 8, c: 14 } ],
+  pacman: { r: 4, c: 10 },
+  ghosts: [ { r: 1, c: 1 }, { r: 1, c: 18 }, { r: 6, c: 1 }, { r: 6, c: 18 } ],
 };
 // Pac-Man is Gemini-driven: each turn its model picks a move to survive while
 // collecting pellets (see decidePacman). Pac-Man reads its FIXED pacman.md rule and
 // does NOT learn — only the ghosts learn (via Antigravity).
 
-// 10 rows x 16 cols arena (1=wall, 0=floor). For now it's an open rectangle with
-// only a wall border — no interior maze walls / power-pellets / jail / fruit yet.
+// 8 rows x 20 cols arena (1=wall, 0=floor) — a low, wide rectangle. For now it's an
+// open rectangle with only a wall border — no interior maze walls / power-pellets /
+// jail / fruit yet (those come next).
 const MAZE = [
-  [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
-  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
-  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
-  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
-  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
-  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
-  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
-  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
-  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
-  [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
+  [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
+  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
 ];
-const ROWS = 10, COLS = 16;
+const ROWS = 8, COLS = 20;
 const MAZE_TEXT = MAZE.map(row => row.map(v => (v ? "#" : ".")).join("")).join("\n");
 
 // ---- Gemini (Google AI Studio, OpenAI-compatible) config ----------------
@@ -816,7 +815,7 @@ function buildGhostsContext() {
     (MEMORY[g.key] || "").trim(),
   ].join("\n")).join("\n\n");
   return [
-    `You control ALL FOUR ghosts (Atlanta, Berkeley, Chicago, Delaware) cooperating to catch Pac-Man on a 10x16 grid (10 rows, 16 cols; coordinates row,col with row 0 at the top).`,
+    `You control ALL FOUR ghosts (Atlanta, Berkeley, Chicago, Delaware) cooperating to catch Pac-Man on a 8x20 grid (8 rows, 20 cols; coordinates row,col with row 0 at the top).`,
     `The four ghosts move SIMULTANEOUSLY this turn. The ghosts win by moving onto Pac-Man's cell.`,
     ``,
     `MAZE (#=wall, .=floor):`,
@@ -954,7 +953,7 @@ function buildPacmanContext() {
     ? [...game.pellets].map(k => `(${k})`).join(" ")
     : "none left";
   return [
-    `You are Pac-Man in a turn-based chase on a 10x16 grid (10 rows, 16 cols; coordinates are row,col with row 0 at the top).`,
+    `You are Pac-Man in a turn-based chase on a 8x20 grid (8 rows, 20 cols; coordinates are row,col with row 0 at the top).`,
     `Four ghosts are hunting you. You LOSE the instant a ghost moves onto your cell. It is your move.`,
     `Survive as long as possible — keep away from the ghosts — while eating pellets when it is safe to.`,
     ``,
@@ -1064,7 +1063,7 @@ function buildLearningContext(win) {
     ? `OUTCOME: the ghosts WON — they caught Pac-Man on turn ${game.turn}. Final score ${game.score} (higher = caught faster).`
     : `OUTCOME: the ghosts LOST — Pac-Man survived all ${MAX_TURN} turns. Final score ${game.score}.`;
   return [
-    `You are the shared learning module for four ghosts (Atlanta, Berkeley, Chicago, Delaware) that cooperate to catch Pac-Man on a 10x16 maze (10 rows, 16 cols; coordinates row,col with row 0 at the top).`,
+    `You are the shared learning module for four ghosts (Atlanta, Berkeley, Chicago, Delaware) that cooperate to catch Pac-Man on a 8x20 maze (8 rows, 20 cols; coordinates row,col with row 0 at the top).`,
     `A game just finished. Study the move-by-move transcript and the current strategy notes, then REWRITE all five notes so the ghosts catch Pac-Man FASTER next game.`,
     ``,
     `MAZE (#=wall, .=floor):`,
@@ -1158,7 +1157,7 @@ function buildPacmanLearningContext(win) {
     ? `OUTCOME: you (Pac-Man) were CAUGHT on turn ${game.turn}. Final score ${game.score} (higher = caught faster, which is BAD for you).`
     : `OUTCOME: you (Pac-Man) SURVIVED all ${MAX_TURN} turns and escaped the ghosts.`;
   return [
-    `You are Pac-Man, a solo agent learning to survive four cooperating ghosts on a 10x16 maze (10 rows, 16 cols; coordinates row,col with row 0 at the top) while eating pellets.`,
+    `You are Pac-Man, a solo agent learning to survive four cooperating ghosts on a 8x20 maze (8 rows, 20 cols; coordinates row,col with row 0 at the top) while eating pellets.`,
     `A game just finished. Study the move-by-move transcript and your current notes, then REWRITE your notes so you SURVIVE LONGER next game — avoid getting cornered, keep escape routes open, and only grab pellets when it is safe.`,
     ``,
     `MAZE (#=wall, .=floor):`,
