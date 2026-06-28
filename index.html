@@ -391,6 +391,25 @@
   .logmsg.fallback { color: #ff9a9a; }
   .logempty { color: var(--muted); font-style: italic; text-align: center; padding: 20px; }
 
+  /* per-round metrics list (in the result modal) */
+  .metrics {
+    width: 100%;
+    max-height: 28vh;
+    overflow: auto;
+    background: var(--floor);
+    border: 1px solid var(--edge);
+    border-radius: 8px;
+    padding: 8px 12px;
+    font-size: 12.5px;
+    line-height: 1.6;
+    text-align: left;
+    color: var(--ink);
+  }
+  .metrics:empty { display: none; }
+  .metrics-title { color: var(--muted); font-size: 11px; letter-spacing: 1px; margin-bottom: 4px; }
+  .metric-row b.mwin { color: #4dff88; }
+  .metric-row b.mlose { color: #ff5d5d; }
+
   /* result */
   .verdict { font-size: 40px; font-weight: bold; letter-spacing: 3px; }
   .verdict.win { color: #4dff88; text-shadow: 0 0 18px rgba(77,255,136,.4); }
@@ -519,6 +538,7 @@
     <div class="card">
       <div id="resVerdict" class="verdict win">VICTORY</div>
       <div id="resLine" class="resultline">Round 1 — score 80, caught in 12 turns</div>
+      <div id="resMetrics" class="metrics"></div>
       <div class="row">
         <button class="primary" id="againBtn">Play Again</button>
         <button id="resultMenu">Main Menu</button>
@@ -654,8 +674,10 @@ const game = {
   activeGhost: "pacman",  // which actor the TOP memory panel shows
   status: "playing",      // playing | over
   pellets: new Set(),     // "r,c" floor cells with a pellet
+  transcript: [],         // per-game move-by-move log (fed to the learning call)
 };
 let history = [];          // snapshots for the "<<" rewind
+let metrics = [];          // per-round results: {round, win, turns, score}
 
 // ===================================================================
 // Screen navigation
@@ -922,9 +944,134 @@ function escapeHtml(s) {
 }
 
 // ===================================================================
+// Learning (Reflexion) — after each game, ONE Grok call reads the game's
+// transcript + the current 5 .md and REWRITES all 5 so the ghosts improve.
+// Only ghosts learn; Pac-Man has no .md.
+// ===================================================================
+const LEARN_KEYS = ["atlanta", "berkeley", "chicago", "delaware", "team"];
+
+// One transcript line per sub-turn: who moved which way, resulting positions, why.
+function recordTurn(name, dir, reason) {
+  const pac = `Pac(${PACMAN.pos.r},${PACMAN.pos.c})`;
+  const gs = GHOSTS.map(g => `${g.name[0]}(${g.pos.r},${g.pos.c})`).join(" ");
+  game.transcript.push(`T${game.turn} ${name} ${dir} → ${pac} ${gs} | ${oneLine(reason)}`);
+}
+
+function buildLearningContext(win) {
+  const outcome = win
+    ? `OUTCOME: the ghosts WON — they caught Pac-Man on turn ${game.turn}. Final score ${game.score} (higher = caught faster).`
+    : `OUTCOME: the ghosts LOST — Pac-Man survived all ${MAX_TURN} turns. Final score ${game.score}.`;
+  return [
+    `You are the shared learning module for four ghosts (Atlanta, Berkeley, Chicago, Delaware) that cooperate to catch Pac-Man on a 10x10 maze (coordinates row,col with row 0 at the top).`,
+    `A game just finished. Study the move-by-move transcript and the current strategy notes, then REWRITE all five notes so the ghosts catch Pac-Man FASTER next game.`,
+    ``,
+    `MAZE (#=wall, .=floor):`,
+    MAZE_TEXT,
+    ``,
+    outcome,
+    ``,
+    `TRANSCRIPT (each line: turn, who moved which direction, resulting positions Pac/A/B/C/D, and the reason given):`,
+    game.transcript.length ? game.transcript.join("\n") : "(no moves recorded)",
+    ``,
+    `CURRENT NOTES:`,
+    `===ATLANTA===`, (MEMORY.atlanta || "").trim(),
+    `===BERKELEY===`, (MEMORY.berkeley || "").trim(),
+    `===CHICAGO===`, (MEMORY.chicago || "").trim(),
+    `===DELAWARE===`, (MEMORY.delaware || "").trim(),
+    `===TEAM===`, (MEMORY.team || "").trim(),
+    `===END===`,
+    ``,
+    `Write concrete, human-readable guidance in plain language about positions and directions — which way each ghost should head, how to spread out and pincer, where to cut off escape routes, how pellets pull Pac-Man. Do NOT invent fixed keyword commands. Add brief "# reason" lines explaining each idea. Each ghost note is personal to that ghost; the team note is shared coordination they all read.`,
+    `Reply EXACTLY in this delimited format and nothing else (no JSON, no code fences):`,
+    `===ATLANTA===`,
+    `<atlanta notes>`,
+    `===BERKELEY===`,
+    `<berkeley notes>`,
+    `===CHICAGO===`,
+    `<chicago notes>`,
+    `===DELAWARE===`,
+    `<delaware notes>`,
+    `===TEAM===`,
+    `<team notes>`,
+    `===END===`,
+  ].join("\n");
+}
+
+// Parse the delimited reply into {atlanta, berkeley, chicago, delaware, team}.
+// Missing/empty blocks are simply absent (caller keeps the old note).
+function parseLearning(text) {
+  const markers = "ATLANTA|BERKELEY|CHICAGO|DELAWARE|TEAM|END";
+  const out = {};
+  for (const k of LEARN_KEYS) {
+    const re = new RegExp(`===${k.toUpperCase()}===([\\s\\S]*?)===(?:${markers})===`, "i");
+    const m = text.match(re);
+    const body = m ? m[1].trim() : "";
+    if (body) out[k] = body;
+  }
+  return out;
+}
+
+// Apply parsed notes to MEMORY (keep old where a block is missing), then refresh
+// the Memory panel so the new .md is visible before the next round.
+function applyLearning(blocks) {
+  let n = 0;
+  for (const k of LEARN_KEYS) {
+    if (blocks[k]) { MEMORY[k] = blocks[k].endsWith("\n") ? blocks[k] : blocks[k] + "\n"; n++; }
+  }
+  renderTeamMem();
+  renderGhostMem();
+  return n;
+}
+
+// ONE learning call with the same robust retry + fallback as the move calls.
+// Logs an "Learning" API row (success / try-failed / fallback) so the run is
+// confirmable; on total failure the notes are left unchanged.
+async function learnFromGame(win, key) {
+  const messages = [
+    { role: "system", content: "You improve four cooperating ghosts' strategy notes after each game so they catch Pac-Man faster. Reply only in the exact delimited format requested." },
+    { role: "user", content: buildLearningContext(win) },
+  ];
+  const TRIES = 4;
+  for (let attempt = 0; attempt < TRIES; attempt++) {
+    try {
+      const reply = await callGrok(messages, key);
+      const blocks = parseLearning(reply);
+      if (!Object.keys(blocks).length) throw new Error("no notes parsed: " + oneLine(reply));
+      const n = applyLearning(blocks);
+      logApi("Learning", `success (try ${attempt + 1}/${TRIES}) — ${n}/5 notes rewritten`, false);
+      return;
+    } catch (e) {
+      console.log(`[OmegaPacman] Learning try ${attempt + 1}/${TRIES} failed: ${e.message}`);
+      logApi("Learning", `try ${attempt + 1}/${TRIES} failed: ${oneLine(e.message)}`, true);
+      if (attempt < TRIES - 1) await sleep(500 * Math.pow(2, attempt) + Math.random() * 400);
+    }
+  }
+  logApi("Learning", `fallback — notes unchanged (all ${TRIES} Grok tries failed)`, true);
+}
+
+// ---- per-round metrics --------------------------------------------------
+function recordMetric(win) {
+  metrics.push({ round: game.round, win, turns: win ? game.turn : null, score: game.score });
+}
+function renderMetrics() {
+  const el = document.getElementById("resMetrics");
+  if (!el) return;
+  if (!metrics.length) { el.innerHTML = ""; return; }
+  el.innerHTML =
+    `<div class="metrics-title">Rounds so far</div>` +
+    metrics.map(m =>
+      `<div class="metric-row">` +
+      `R${m.round} · <b class="${m.win ? "mwin" : "mlose"}">${m.win ? "CAUGHT" : "ESCAPED"}</b> · ` +
+      `${m.win ? "turn " + m.turns : "survived " + MAX_TURN} · score ${m.score}` +
+      `</div>`
+    ).join("");
+}
+
+// ===================================================================
 // Round / turn flow
 // ===================================================================
 function startGame() {                 // begin a fresh series at round 1
+  metrics = [];                        // reset the per-round metrics for the new series
   startRound(1);
 }
 function startRound(roundNum) {
@@ -940,6 +1087,7 @@ function startRound(roundNum) {
   for (let r = 0; r < SIZE; r++)
     for (let c = 0; c < SIZE; c++)
       if (isFloor(r, c) && !occupied(r, c)) game.pellets.add(keyOf(r, c));
+  game.transcript = [];                   // fresh game log for this round's learning
   history = [];
   setPlaying(false);
   buildBoard();
@@ -1013,6 +1161,7 @@ async function doSubTurn() {
     PACMAN.pos = dec.move;
     game.pellets.delete(keyOf(PACMAN.pos.r, PACMAN.pos.c));   // eat pellet on landing
     showMoveInfo(PAC, dec);                         // "Pac-Man → left · …"
+    recordTurn("Pac-Man", dec.dir, dec.reason);
   } else {
     const g = GHOSTS[i - 1];
     let dec;
@@ -1029,6 +1178,7 @@ async function doSubTurn() {
     g.pos = dec.move;
     game.score = Math.max(0, game.score - 1);       // each ghost move costs -1
     showMoveInfo(g, dec);
+    recordTurn(g.name, dec.dir, dec.reason);
   }
 
   if (caught()) { endGame(true); return; }          // collision -> ghosts win
@@ -1069,10 +1219,11 @@ document.getElementById("fwdBtn").addEventListener("click", () => { setPlaying(f
 document.getElementById("backBtn").addEventListener("click", () => { setPlaying(false); stepBackward(); });
 document.getElementById("playBtn2").addEventListener("click", () => setPlaying(!playing));
 
-function endGame(win) {
+async function endGame(win) {
   game.status = "over";
   setPlaying(false);
   renderGame();                                    // show the final board state
+  recordMetric(win);                               // append this round to the metrics list
   const v = document.getElementById("resVerdict");
   v.textContent = win ? "VICTORY" : "DEFEAT";
   v.className = "verdict " + (win ? "win" : "lose");
@@ -1081,6 +1232,15 @@ function endGame(win) {
     : `Round ${game.round} / ${game.rounds} — DEFEAT · Pac-Man survived ${MAX_TURN} turns · score 0`;
   const again = document.getElementById("againBtn");
   again.textContent = game.round < game.rounds ? "Next Round" : "Play Again";
+  renderMetrics();
+
+  // LEARNING: ghosts reflect on this game and rewrite their .md before the next
+  // round. Show "Ghosts are learning…" while the single Grok call runs, so the
+  // updated notes are already visible in the Memory panel when the modal opens.
+  if (game.apiKey) {
+    setTurnLabel("Ghosts are learning…", "var(--accent)", true);
+    await learnFromGame(win, game.apiKey);
+  }
   show("resultModal", true);                        // modal over the board (no page switch)
 }
 
