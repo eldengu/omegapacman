@@ -654,10 +654,10 @@ const MEMORY = {
   team:     "# Team (shared)\n\n(no shared strategy yet — learning comes later)\n",
 };
 
-// Turn cycle length: Pac-Man, then the four ghosts (actor index 0..4). The
-// live status for each actor now lives in the big #turnlabel (see the status
-// helpers), so no per-actor label strings are needed here.
-const ACTORS = [0, 1, 2, 3, 4];
+// Turn cycle has TWO phases: phase 0 = Pac-Man (its own Grok call), phase 1 =
+// all four ghosts (one Grok call, they move simultaneously). The live status
+// for each phase lives in the big #turnlabel (see the status helpers).
+const ACTORS = [0, 1];
 
 // ---- scoring config -----------------------------------------------------
 const START_SCORE = 120;     // -1 per ghost move; 4 ghosts * 30 turns = 120
@@ -752,8 +752,10 @@ function pickRandom(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
 const caught = () => GHOSTS.some(g => samePos(g.pos, PACMAN.pos));
 
 // ===================================================================
-// Grok ghost brains. Each ghost's sub-turn asks Grok to pick one legal move
-// from the game state + its own .md + team.md (no predefined strategy keywords).
+// Grok ghost brains. ONE call per turn decides all four ghosts at once (they
+// move simultaneously). The prompt keeps each ghost's own .md + the team .md so
+// every ghost still has its own strategy; the reply gives each ghost its own
+// move + reason. (Pac-Man is decided first, by its own separate call.)
 // ===================================================================
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const oneLine = s => (s || "").replace(/\s+/g, " ").trim().slice(0, 160);
@@ -766,37 +768,64 @@ function dirOf(from, to) {
   return "stay";
 }
 
-// Build the textual decision context handed to Grok for ghost index i (1..4).
-function buildGhostContext(i) {
-  const g = GHOSTS[i - 1];
-  const others = GHOSTS
-    .filter((_, j) => j !== i - 1)
-    .map(o => `${o.name} (${o.pos.r},${o.pos.c})`).join(", ");
-  const legal = ["up", "down", "left", "right"].map(dir => {
+// Build the single decision context for ALL four ghosts. Includes the shared
+// game state, each ghost's legal moves + its own .md, and the team .md.
+function legalMovesText(pos) {
+  return ["up", "down", "left", "right"].map(dir => {
     const [dr, dc] = DIRV[dir];
-    const r = g.pos.r + dr, c = g.pos.c + dc;
+    const r = pos.r + dr, c = pos.c + dc;
     return isFloor(r, c) ? `${dir}→(${r},${c}) open` : `${dir}→wall`;
   }).join(", ");
+}
+function buildGhostsContext() {
+  const positions = GHOSTS.map(g => `${g.name} (${g.pos.r},${g.pos.c})`).join(", ");
+  const perGhost = GHOSTS.map(g => [
+    `${g.name} at (${g.pos.r},${g.pos.c}) — legal moves: ${legalMovesText(g.pos)}`,
+    `--- ${g.name.toLowerCase()}.md ---`,
+    (MEMORY[g.key] || "").trim(),
+  ].join("\n")).join("\n\n");
   return [
-    `You are the ghost ${g.name} in a turn-based chase on a 10x10 grid (coordinates are row,col with row 0 at the top).`,
-    `Ghosts win by moving onto Pac-Man's cell. It is your move.`,
+    `You control ALL FOUR ghosts (Atlanta, Berkeley, Chicago, Delaware) cooperating to catch Pac-Man on a 10x10 grid (coordinates row,col with row 0 at the top).`,
+    `The four ghosts move SIMULTANEOUSLY this turn. The ghosts win by moving onto Pac-Man's cell.`,
     ``,
     `MAZE (#=wall, .=floor):`,
     MAZE_TEXT,
     ``,
     `Pac-Man is at (${PACMAN.pos.r},${PACMAN.pos.c}).`,
-    `You, ${g.name}, are at (${g.pos.r},${g.pos.c}).`,
-    `Other ghosts: ${others}.`,
-    `Your legal moves: ${legal}.`,
+    `Ghost positions: ${positions}.`,
     ``,
-    `--- your notes (${g.name.toLowerCase()}.md) ---`,
-    (MEMORY[g.key] || "").trim(),
-    `--- team notes (team.md) ---`,
+    `Each ghost, its legal moves, and its own strategy notes:`,
+    ``,
+    perGhost,
+    ``,
+    `--- team notes (team.md, shared by all ghosts) ---`,
     (MEMORY.team || "").trim(),
     ``,
-    `Choose exactly ONE legal move (one that is "open", not a wall).`,
-    `Reply on a single line EXACTLY as:  MOVE: <up|down|left|right> | REASON: <one short sentence>`,
+    `Choose exactly ONE legal move for EACH ghost (a move marked "open", not a wall), and give each its own brief reason.`,
+    `Reply with EXACTLY these four lines and nothing else:`,
+    `ATLANTA: <up|down|left|right> · <reason>`,
+    `BERKELEY: <up|down|left|right> · <reason>`,
+    `CHICAGO: <up|down|left|right> · <reason>`,
+    `DELAWARE: <up|down|left|right> · <reason>`,
   ].join("\n");
+}
+
+// Parse the four-line reply into {key: {dir, move, reason}} for each ghost whose
+// line is present AND legal. Missing/illegal ghosts are simply absent (the caller
+// gives those a random-legal fallback).
+function parseGhostsReply(reply) {
+  const out = {};
+  for (const g of GHOSTS) {
+    const re = new RegExp(`${g.name}\\s*[:\\-]\\s*(up|down|left|right)\\b[ \\t]*[·:\\-|–—]?[ \\t]*([^\\n]*)`, "i");
+    const m = (reply || "").match(re);
+    if (!m) continue;
+    const dir = m[1].toLowerCase();
+    const [dr, dc] = DIRV[dir];
+    const move = { r: g.pos.r + dr, c: g.pos.c + dc };
+    if (!isFloor(move.r, move.c)) continue;                  // illegal -> skip
+    out[g.key] = { dir, move, reason: oneLine(m[2]) || "(no reason given)" };
+  }
+  return out;
 }
 
 // Parse Grok's reply into a legal move; returns {dir, move, reason} or null.
@@ -825,33 +854,44 @@ async function callGrok(messages, key) {
   return text;
 }
 
-// Decide ghost i's move via Grok: ~5 tries with backoff+jitter, then random.
-async function decideGhostGrok(i, key) {
-  const g = GHOSTS[i - 1];
-  const legal = moveOptions(g.pos, false);
-  if (!legal.length) return { move: { ...g.pos }, dir: "stay", reason: "no legal move", fallback: false };
-
+// Decide ALL four ghosts in ONE Grok call: ~5 tries with backoff+jitter. Returns
+// an array of {g, move, dir, reason, fallback} — one per ghost, in GHOSTS order.
+// Any ghost missing/illegal in the reply gets a random-legal move (logged).
+async function decideGhostsGrok(key) {
   const messages = [
-    { role: "system", content: "You control one ghost cooperating with three others to catch Pac-Man in a maze. Think briefly, then answer in the exact requested format." },
-    { role: "user", content: buildGhostContext(i) },
+    { role: "system", content: "You control all four cooperating ghosts at once to catch Pac-Man in a maze; they move simultaneously. Think briefly, then answer in the exact requested format." },
+    { role: "user", content: buildGhostsContext() },
   ];
   const TRIES = 5;
+  let parsed = {}, success = false;
   for (let attempt = 0; attempt < TRIES; attempt++) {
     try {
       const reply = await callGrok(messages, key);
-      const parsed = parseGhostReply(reply, g);
-      if (parsed) { logApi(g.name, `success (try ${attempt + 1}/${TRIES})`, false); return { ...parsed, fallback: false }; }
-      throw new Error("unparseable/illegal reply: " + oneLine(reply));
+      parsed = parseGhostsReply(reply);
+      if (!Object.keys(parsed).length) throw new Error("no ghost moves parsed: " + oneLine(reply));
+      logApi("Ghosts", `success (try ${attempt + 1}/${TRIES}) — ${Object.keys(parsed).length}/4 parsed`, false);
+      success = true;
+      break;
     } catch (e) {
-      console.log(`[OmegaPacman] ${g.name} try ${attempt + 1}/${TRIES} failed: ${e.message}`);
-      logApi(g.name, `try ${attempt + 1}/${TRIES} failed: ${oneLine(e.message)}`, true);
+      console.log(`[OmegaPacman] Ghosts try ${attempt + 1}/${TRIES} failed: ${e.message}`);
+      logApi("Ghosts", `try ${attempt + 1}/${TRIES} failed: ${oneLine(e.message)}`, true);
       if (attempt < TRIES - 1) await sleep(500 * Math.pow(2, attempt) + Math.random() * 400);
     }
   }
-  const mv = pickRandom(legal);
-  console.log(`[OmegaPacman] ${g.name}: all ${TRIES} tries failed — random fallback ${dirOf(g.pos, mv)}`);
-  logApi(g.name, `fallback-to-random → ${dirOf(g.pos, mv)} (all ${TRIES} Grok tries failed)`, true);
-  return { move: mv, dir: dirOf(g.pos, mv), reason: "(random fallback — Grok unavailable)", fallback: true };
+  if (!success) logApi("Ghosts", `fallback — all ${TRIES} Grok tries failed; each ghost moves randomly`, true);
+
+  return GHOSTS.map(g => {
+    const p = parsed[g.key];
+    if (p) return { g, move: p.move, dir: p.dir, reason: p.reason, fallback: false };
+    const legal = moveOptions(g.pos, false);
+    const mv = legal.length ? pickRandom(legal) : { ...g.pos };
+    if (success) logApi(g.name, `missing/illegal in ghost reply — random fallback → ${dirOf(g.pos, mv)}`, true);
+    return {
+      g, move: mv, dir: dirOf(g.pos, mv),
+      reason: success ? "(random fallback — missing/illegal move)" : "(random fallback — Grok unavailable)",
+      fallback: true,
+    };
+  });
 }
 
 // Build the textual decision context handed to Grok for Pac-Man. Pac-Man has
@@ -925,7 +965,7 @@ function setTurnLabel(html, color, thinking) {
 // Idle/ready state (round start, rewind): whose move is next.
 function setReadyLabel(actorIndex) {
   if (actorIndex === 0) setTurnLabel("Pac-Man — to move", "var(--pac)", false);
-  else { const g = GHOSTS[actorIndex - 1]; setTurnLabel(`${g.name} — to move`, g.color, false); }
+  else setTurnLabel("Ghosts — to move", "var(--accent)", false);
 }
 // Show the latest decision (move + reason) in the big label, and record it in
 // the permanent activity log (the label clears on the next move; the log keeps it).
@@ -938,6 +978,15 @@ function showMoveInfo(g, dec) {
 }
 function setThinking(g) {
   setTurnLabel(`${g.name} is deciding…`, g.color, true);
+}
+// All four ghosts moved together: show each (colored) name → dir in the big
+// label, and record a MOVE row per ghost (with its own reason) in the log.
+function showGhostsInfo(decs) {
+  const html = decs.map(d =>
+    `<span class="tl-actor" style="color:${d.g.color};font-size:22px">${d.g.name} → ${d.dir}</span>`
+  ).join(`<span class="tl-reason"> · </span>`);
+  setTurnLabel(html, "var(--ink)", false);
+  decs.forEach(d => logMove(d.g.name, d.dir, d.reason, d.fallback));
 }
 function escapeHtml(s) {
   return (s || "").replace(/[&<>]/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[ch]));
@@ -1104,8 +1153,10 @@ function renderGame() {
   // (setThinking / showMoveInfo / setReadyLabel), not here — so a ghost's
   // decision text survives the board re-render that follows its move.
 
-  // Top memory panel auto-follows the current actor (Pac-Man or a ghost).
-  game.activeGhost = game.actor === 0 ? "pacman" : GHOSTS[game.actor - 1].key;
+  // Top memory panel: on Pac-Man's phase show "?"; on the ghosts' phase show a
+  // ghost strategy (keep the user's chosen ghost tab, else default to Atlanta).
+  if (game.actor === 0) game.activeGhost = "pacman";
+  else if (game.activeGhost === "pacman") game.activeGhost = "atlanta";
   renderGhostMem();
 
   drawEntities();
@@ -1163,27 +1214,30 @@ async function doSubTurn() {
     showMoveInfo(PAC, dec);                         // "Pac-Man → left · …"
     recordTurn("Pac-Man", dec.dir, dec.reason);
   } else {
-    const g = GHOSTS[i - 1];
-    let dec;
+    let decs;
     if (game.apiKey) {
-      setThinking(g);
-      dec = await decideGhostGrok(i, game.apiKey); // Grok decides
+      setTurnLabel("Ghosts are deciding…", "var(--accent)", true);
+      decs = await decideGhostsGrok(game.apiKey);  // ONE call decides all four
       if (game.status !== "playing") return;       // game was reset mid-call
     } else {
-      logApi(g.name, "no API key — random move (no Grok call)", true);
-      const opts = moveOptions(g.pos, false);
-      const mv = opts.length ? pickRandom(opts) : { ...g.pos };
-      dec = { move: mv, dir: dirOf(g.pos, mv), reason: "(no API key — random move)", fallback: true };
+      logApi("Ghosts", "no API key — random moves (no Grok call)", true);
+      decs = GHOSTS.map(g => {
+        const opts = moveOptions(g.pos, false);
+        const mv = opts.length ? pickRandom(opts) : { ...g.pos };
+        return { g, move: mv, dir: dirOf(g.pos, mv), reason: "(no API key — random move)", fallback: true };
+      });
     }
-    g.pos = dec.move;
-    game.score = Math.max(0, game.score - 1);       // each ghost move costs -1
-    showMoveInfo(g, dec);
-    recordTurn(g.name, dec.dir, dec.reason);
+    decs.forEach(d => {                              // apply all four together
+      d.g.pos = d.move;
+      game.score = Math.max(0, game.score - 1);      // each ghost move costs -1
+    });
+    showGhostsInfo(decs);                            // label + one MOVE row per ghost
+    decs.forEach(d => recordTurn(d.g.name, d.dir, d.reason));
   }
 
   if (caught()) { endGame(true); return; }          // collision -> ghosts win
 
-  if (i === ACTORS.length - 1) {                     // Delaware finished the turn
+  if (i === ACTORS.length - 1) {                     // ghosts phase finished the turn
     game.actor = 0;
     game.turn += 1;
     if (game.turn > MAX_TURN) { game.score = 0; endGame(false); return; }
