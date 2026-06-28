@@ -82,6 +82,23 @@
     width: 360px;
     max-width: 80vw;
   }
+  textarea {
+    font: 12px/1.45 ui-monospace, "Cascadia Code", Consolas, monospace;
+    padding: 9px 11px;
+    background: var(--floor);
+    color: var(--ink);
+    border: 1px solid var(--edge);
+    border-radius: 8px;
+    width: 380px;
+    max-width: 84vw;
+    resize: vertical;
+  }
+  /* setup-screen "paste starting memory" section (collapsible) */
+  .memseed { width: 100%; max-width: 420px; }
+  .memseed > summary { cursor: pointer; color: var(--accent); font-size: 14px; padding: 4px 0; }
+  .memseed[open] > summary { margin-bottom: 6px; }
+  .memseed .field { margin-top: 8px; }
+  .memseed .hint { text-align: left; max-width: none; }
   label.field { display: flex; flex-direction: column; gap: 8px; font-size: 14px; color: var(--muted); }
 
   .card {
@@ -504,6 +521,17 @@
         <input id="roundsInput" type="number" min="1" max="30" value="3" />
       </label>
       <p class="hint">Each round, the ghosts get one game to catch Pac-Man, then reflect on what happened.</p>
+
+      <details class="memseed">
+        <summary>Paste starting memory (optional)</summary>
+        <p class="hint">Paste saved strategy (.md) so the ghosts start the game with it from turn 1. Leave a box empty to use the default.</p>
+        <label class="field">Team strategy<textarea id="memTeam" rows="3" spellcheck="false" placeholder="team.md…"></textarea></label>
+        <label class="field">Atlanta<textarea id="memAtlanta" rows="3" spellcheck="false" placeholder="atlanta.md…"></textarea></label>
+        <label class="field">Berkeley<textarea id="memBerkeley" rows="3" spellcheck="false" placeholder="berkeley.md…"></textarea></label>
+        <label class="field">Chicago<textarea id="memChicago" rows="3" spellcheck="false" placeholder="chicago.md…"></textarea></label>
+        <label class="field">Delaware<textarea id="memDelaware" rows="3" spellcheck="false" placeholder="delaware.md…"></textarea></label>
+      </details>
+
       <div class="row">
         <button data-go="apikey">Back</button>
         <button class="primary" id="playBtn">Play</button>
@@ -762,9 +790,10 @@ function apiKey() {
 const DIRV = { up: [-1, 0], down: [1, 0], left: [0, -1], right: [0, 1] };
 
 // SKILL.md memory — READ-ONLY during play. Pac-Man's note is a FIXED rule (it does
-// not learn). The ghosts' notes start empty and are rewritten by direct Gemini
-// training after each game. So: fixed Pac-Man vs a learning ghost swarm.
-const MEMORY = {
+// not learn). The ghosts' notes start at the DEFAULTS below (or whatever is pasted
+// into the setup-screen memory boxes) and are rewritten by direct Gemini training
+// after each game. So: fixed Pac-Man vs a learning ghost swarm.
+const DEFAULT_MEMORY = {
   pacman:   "# Pac-Man (fixed rules)\n\nEat pellets, avoid ghosts, maximize distance from the nearest ghost.\n",
   atlanta:  "# Atlanta\n\n(no strategy yet — learning comes later)\n",
   berkeley: "# Berkeley\n\n(no strategy yet — learning comes later)\n",
@@ -772,6 +801,7 @@ const MEMORY = {
   delaware: "# Delaware\n\n(no strategy yet — learning comes later)\n",
   team:     "# Team (shared)\n\n(no shared strategy yet — learning comes later)\n",
 };
+const MEMORY = { ...DEFAULT_MEMORY };   // live notes the agents read when deciding moves
 
 // Turn cycle has TWO phases: phase 0 = Pac-Man (its own Gemini call), phase 1 =
 // all four ghosts (one Gemini call, they move simultaneously). The live status
@@ -829,9 +859,23 @@ document.getElementById("apikeyNext").addEventListener("click", () => {
 });
 
 // Setup screen
+// Seed the ghosts' starting memory from the paste boxes: a non-empty box becomes
+// that agent's starting .md (read from turn 1); an empty box keeps the default.
+// Pac-Man's note stays its fixed rule. Done BEFORE startGame so the start-of-round
+// snapshot + turn-1 decisions use the pasted memory.
+function applyStartingMemory() {
+  const boxes = { team: "memTeam", atlanta: "memAtlanta", berkeley: "memBerkeley", chicago: "memChicago", delaware: "memDelaware" };
+  for (const [key, id] of Object.entries(boxes)) {
+    const el = document.getElementById(id);
+    const v = (el && el.value || "").trim();
+    MEMORY[key] = v ? (v.endsWith("\n") ? v : v + "\n") : DEFAULT_MEMORY[key];
+  }
+  MEMORY.pacman = DEFAULT_MEMORY.pacman;   // Pac-Man is fixed/non-learning
+}
 document.getElementById("playBtn").addEventListener("click", () => {
   // Cap the experiment at 30 rounds max (ghost training runs each round).
   game.rounds = Math.min(30, Math.max(1, parseInt(document.getElementById("roundsInput").value, 10) || 1));
+  applyStartingMemory();                   // pasted boxes -> starting .md (empty -> default)
   startGame();
   showScreen("game");
 });
