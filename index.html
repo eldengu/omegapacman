@@ -455,7 +455,7 @@
         <input id="apikeyInput" type="password" autocomplete="off" spellcheck="false"
                placeholder="AIza..." />
       </label>
-      <p class="hint">Used for every model call via Gemini: Pac-Man (gemini-3.5-flash), the ghosts (gemini-2.5-flash-lite), and the learning step (gemini-2.5-flash-lite). Stored in memory only for this session.</p>
+      <p class="hint">Used for every model call via Gemini: Pac-Man play + learning (gemini-2.5-pro) and the ghosts' play + learning (gemini-2.5-flash-lite). Stored in memory only for this session.</p>
       <div class="row">
         <button data-go="start">Back</button>
         <button class="primary" id="apikeyNext">Next</button>
@@ -590,7 +590,7 @@
       <label class="field">Google AI Studio API key
         <input id="settingsKey" type="password" autocomplete="off" spellcheck="false" placeholder="AIza..." />
       </label>
-      <p class="hint">Used for all Gemini calls: Pac-Man (gemini-3.5-flash), ghosts + learning (gemini-2.5-flash-lite). Kept in memory only.</p>
+      <p class="hint">Used for all Gemini calls: Pac-Man play + learning (gemini-2.5-pro), ghosts play + learning (gemini-2.5-flash-lite). Kept in memory only.</p>
       <div class="row">
         <button id="settingsCancel">Cancel</button>
         <button class="primary" id="settingsClose">Save</button>
@@ -650,8 +650,8 @@ const MAZE_TEXT = MAZE.map(row => row.map(v => (v ? "#" : ".")).join("")).join("
 // The API key is read from the ⚙️ key input (game.apiKey) or a
 // globalThis.GEMINI_API_KEY env-like override — it is never hardcoded.
 const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";
-const PACMAN_MODEL = "gemini-3.5-flash";        // Pac-Man play + solo learning
-const GHOST_MODEL  = "gemini-2.5-flash-lite";   // 4-ghost play + collective learning
+const PACMAN_MODEL = "gemini-2.5-pro";          // Pac-Man play + solo learning (strong solo)
+const GHOST_MODEL  = "gemini-2.5-flash-lite";   // 4-ghost play + collective learning (weak swarm)
 function apiKey() {
   return (game.apiKey || (typeof globalThis !== "undefined" && globalThis.GEMINI_API_KEY) || "").trim();
 }
