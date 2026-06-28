@@ -780,7 +780,7 @@ const MAZE_TEXT = MAZE_ASCII.join("\n");
 // There is NO /analyze (Antigravity) call anymore.
 const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";
 const PACMAN_MODEL = "gemini-3.1-flash-lite";   // Pac-Man moves (direct Gemini)
-const GHOST_MODEL  = "gemini-3.1-flash-lite";   // ghost moves + ghost training (direct Gemini)
+const GHOST_MODEL  = "gemini-2.5-flash-lite";   // ghost moves + ghost training (direct Gemini)
 const SERVER_BASE = "http://localhost:5000";
 const SAVE_ROUND_URL = SERVER_BASE + "/save_round";   // {game,round,game_log,result,mds} (fire-and-forget)
 function apiKey() {
