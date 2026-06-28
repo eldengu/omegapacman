@@ -451,11 +451,11 @@
     <h1 class="title">OmegaPacman</h1>
     <div class="card">
       <h2>Connect a brain</h2>
-      <label class="field">Grok / xAI API key
+      <label class="field">Google AI Studio API key
         <input id="apikeyInput" type="password" autocomplete="off" spellcheck="false"
-               placeholder="xai-..." />
+               placeholder="AIza..." />
       </label>
-      <p class="hint">Used for Pac-Man and the learning step (grok-4.3). The ghosts run on a local Ollama model (gemma3:4b-cloud) — no key needed. Stored in memory only for this session.</p>
+      <p class="hint">Used for every model call via Gemini: Pac-Man (gemini-3.5-flash), the ghosts (gemini-2.5-flash-lite), and the learning step (gemini-2.5-flash-lite). Stored in memory only for this session.</p>
       <div class="row">
         <button data-go="start">Back</button>
         <button class="primary" id="apikeyNext">Next</button>
@@ -587,10 +587,10 @@
   <div id="settingsOverlay" class="overlay hidden">
     <div class="card">
       <h2>API Key</h2>
-      <label class="field">Grok / xAI API key
-        <input id="settingsKey" type="password" autocomplete="off" spellcheck="false" placeholder="xai-..." />
+      <label class="field">Google AI Studio API key
+        <input id="settingsKey" type="password" autocomplete="off" spellcheck="false" placeholder="AIza..." />
       </label>
-      <p class="hint">Used for Pac-Man + learning (grok-4.3). Ghosts use local Ollama (gemma3:4b-cloud), no key needed. Kept in memory only.</p>
+      <p class="hint">Used for all Gemini calls: Pac-Man (gemini-3.5-flash), ghosts + learning (gemini-2.5-flash-lite). Kept in memory only.</p>
       <div class="row">
         <button id="settingsCancel">Cancel</button>
         <button class="primary" id="settingsClose">Save</button>
@@ -600,12 +600,13 @@
 
 <script>
 /* ===================================================================
-   OmegaPacman — 4b-cloud variant (asymmetric: strong Pac-Man vs weak ghosts).
-   Each turn Pac-Man asks Grok (grok-4.3) to pick a move to survive while eating
-   pellets; then ONE call to a local Ollama model (gemma3:4b-cloud) decides all
-   four ghosts at once. After each game the learning step (Reflexion) runs on Grok
-   and rewrites the ghosts' .md. Pac-Man has NO memory; only the ghosts learn.
-   Sub-turn controls, scoring, metrics, and rounds are unchanged.
+   OmegaPacman — Gemini unified variant. Every model call goes through Google's
+   Gemini OpenAI-compatible endpoint. Each turn Pac-Man asks gemini-3.5-flash to
+   pick a move to survive while eating pellets; then ONE call to
+   gemini-2.5-flash-lite decides all four ghosts at once. After each game the
+   learning step (Reflexion) runs on gemini-2.5-flash-lite and rewrites the
+   ghosts' .md. Pac-Man has NO memory; only the ghosts learn. Sub-turn controls,
+   scoring, metrics, and rounds are unchanged.
    =================================================================== */
 
 // ---- world data ---------------------------------------------------------
@@ -621,8 +622,8 @@ const START = {
   pacman: { r: 5, c: 4 },
   ghosts: [ { r: 1, c: 1 }, { r: 1, c: 8 }, { r: 8, c: 1 }, { r: 8, c: 8 } ],
 };
-// Pac-Man is Grok-driven too: each turn Grok picks its move to survive the
-// ghosts while collecting pellets (see decidePacmanGrok). Pac-Man has NO .md /
+// Pac-Man is Gemini-driven too: each turn Gemini picks its move to survive the
+// ghosts while collecting pellets (see decidePacmanGemini). Pac-Man has NO .md /
 // no memory — it does not learn.
 
 // 10x10 maze (1=wall, 0=floor).
@@ -641,24 +642,23 @@ const MAZE = [
 const SIZE = 10;
 const MAZE_TEXT = MAZE.map(row => row.map(v => (v ? "#" : ".")).join("")).join("\n");
 
-// ---- Grok (xAI) config --------------------------------------------------
-// ASYMMETRIC setup: Pac-Man + the learning step use Grok (strong); the ghosts'
-// combined move call uses a local Ollama model (weak) — see OLLAMA_* below.
-const GROK_URL = "https://api.x.ai/v1/chat/completions";
-const GROK_MODEL = "grok-4.3";
-
-// ---- Ollama (local, OpenAI-compatible) config — GHOSTS only -------------
-// Served via the local Ollama at localhost:11434 with OLLAMA_ORIGINS set (e.g.
-// OLLAMA_ORIGINS=*) so the browser can reach it. No API key is needed. The model
-// is an Ollama Cloud model (fast GPU-backed weak Gemma), reached through the same
-// local endpoint after `ollama signin`.
-const OLLAMA_URL = "http://localhost:11434/v1/chat/completions";
-const OLLAMA_MODEL = "gemma3:4b-cloud";
+// ---- Gemini (Google AI Studio, OpenAI-compatible) config ----------------
+// UNIFIED: every model call goes through Gemini's OpenAI-compatible endpoint.
+// Pac-Man, the ghosts, and the learning step each use their own model below.
+// The API key is read from the ⚙️ key input (game.apiKey) or a
+// globalThis.GEMINI_API_KEY env-like override — it is never hardcoded.
+const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";
+const GEMINI_PACMAN_MODEL = "gemini-3.5-flash";        // Pac-Man play
+const GEMINI_GHOSTS_MODEL = "gemini-2.5-flash-lite";   // combined 4-ghost play
+const GEMINI_LEARN_MODEL  = "gemini-2.5-flash-lite";   // learning (rewrite .md notes)
+function apiKey() {
+  return (game.apiKey || (typeof globalThis !== "undefined" && globalThis.GEMINI_API_KEY) || "").trim();
+}
 
 const DIRV = { up: [-1, 0], down: [1, 0], left: [0, -1], right: [0, 1] };
 
 // SKILL.md memory — READ-ONLY during play. Starts nearly empty: no strategy,
-// no predefined keywords. Grok decides each move from the game state + these
+// no predefined keywords. Gemini decides each move from the game state + these
 // notes, so early games look near-random (expected). Learning that fills these
 // in comes in STEP 3.
 const MEMORY = {
@@ -669,8 +669,8 @@ const MEMORY = {
   team:     "# Team (shared)\n\n(no shared strategy yet — learning comes later)\n",
 };
 
-// Turn cycle has TWO phases: phase 0 = Pac-Man (its own Grok call), phase 1 =
-// all four ghosts (one Grok call, they move simultaneously). The live status
+// Turn cycle has TWO phases: phase 0 = Pac-Man (its own Gemini call), phase 1 =
+// all four ghosts (one Gemini call, they move simultaneously). The live status
 // for each phase lives in the big #turnlabel (see the status helpers).
 const ACTORS = [0, 1];
 
@@ -761,12 +761,12 @@ function moveOptions(pos, includeStay) {
 function pickRandom(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
 
 // ===================================================================
-// Agents — both Pac-Man and the ghosts are decided by Grok (see below).
+// Agents — both Pac-Man and the ghosts are decided by Gemini (see below).
 // ===================================================================
 const caught = () => GHOSTS.some(g => samePos(g.pos, PACMAN.pos));
 
 // ===================================================================
-// Grok ghost brains. ONE call per turn decides all four ghosts at once (they
+// Gemini ghost brains. ONE call per turn decides all four ghosts at once (they
 // move simultaneously). The prompt keeps each ghost's own .md + the team .md so
 // every ghost still has its own strategy; the reply gives each ghost its own
 // move + reason. (Pac-Man is decided first, by its own separate call.)
@@ -854,7 +854,7 @@ function parseGhostsReply(reply) {
   return out;
 }
 
-// Parse Grok's reply into a legal move; returns {dir, move, reason} or null.
+// Parse Gemini's reply into a legal move; returns {dir, move, reason} or null.
 function parseGhostReply(reply, g) {
   const low = (reply || "").toLowerCase();
   const m = low.match(/move:\s*(up|down|left|right)/) || low.match(/\b(up|down|left|right)\b/);
@@ -867,45 +867,33 @@ function parseGhostReply(reply, g) {
   return { dir, move, reason: rm ? oneLine(rm[1]) : oneLine(reply) };
 }
 
-async function callGrok(messages, key) {
-  const res = await fetch(GROK_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "Authorization": "Bearer " + key },
-    body: JSON.stringify({ model: GROK_MODEL, messages }),
-  });
-  if (!res.ok) { const e = new Error("Grok HTTP " + res.status); e.status = res.status; throw e; }
-  const data = await res.json();
-  const text = data?.choices?.[0]?.message?.content;
-  if (!text) throw new Error("Grok: empty response");
-  return text;
-}
-
-// Local Ollama (OpenAI-compatible). No API key — omit Authorization. A network
-// failure here almost always means Ollama isn't running / reachable from the
-// browser, so we surface a clear, actionable message.
-async function callOllama(messages) {
+// Gemini via its OpenAI-compatible endpoint. Auth is a Bearer API key. The
+// request/response shapes are the standard OpenAI ones (choices[0].message.content),
+// so all parsing downstream is unchanged. A network failure surfaces a clear,
+// actionable message.
+async function callGemini(messages, model) {
   let res;
   try {
-    res = await fetch(OLLAMA_URL, {
+    res = await fetch(GEMINI_URL, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model: OLLAMA_MODEL, messages, stream: false }),
+      headers: { "Content-Type": "application/json", "Authorization": "Bearer " + apiKey() },
+      body: JSON.stringify({ model, messages }),
     });
   } catch (e) {
-    throw new Error("Can't reach Ollama at localhost:11434 — is it running with OLLAMA_ORIGINS=* ?");
+    throw new Error("Can't reach Gemini API at generativelanguage.googleapis.com — check your network and API key.");
   }
-  if (!res.ok) { const e = new Error("Ollama HTTP " + res.status); e.status = res.status; throw e; }
+  if (!res.ok) { const e = new Error("Gemini HTTP " + res.status); e.status = res.status; throw e; }
   const data = await res.json();
   const text = data?.choices?.[0]?.message?.content;
-  if (!text) throw new Error("Ollama: empty response");
+  if (!text) throw new Error("Gemini: empty response");
   return text;
 }
 
-// Decide ALL four ghosts in ONE local Ollama call: ~5 tries with
-// backoff+jitter. Returns an array of {g, move, dir, reason, fallback} — one per
-// ghost, in GHOSTS order. Any ghost missing/illegal in the (often messy) reply
-// gets a random-legal move (logged). Pac-Man + learning stay on Grok.
-async function decideGhostsOllama() {
+// Decide ALL four ghosts in ONE Gemini call: ~5 tries with backoff+jitter.
+// Returns an array of {g, move, dir, reason, fallback} — one per ghost, in
+// GHOSTS order. Any ghost missing/illegal in the reply gets a random-legal move
+// (logged).
+async function decideGhostsGemini() {
   const messages = [
     { role: "system", content: "You control all four cooperating ghosts at once to catch Pac-Man in a maze; they move simultaneously. Think briefly, then answer in the exact requested format." },
     { role: "user", content: buildGhostsContext() },
@@ -914,35 +902,35 @@ async function decideGhostsOllama() {
   let parsed = {}, success = false;
   for (let attempt = 0; attempt < TRIES; attempt++) {
     try {
-      const reply = await callOllama(messages);
+      const reply = await callGemini(messages, GEMINI_GHOSTS_MODEL);
       parsed = parseGhostsReply(reply);
       if (!Object.keys(parsed).length) throw new Error("no ghost moves parsed: " + oneLine(reply));
-      logApi("Ghosts", `success (try ${attempt + 1}/${TRIES}) — ${Object.keys(parsed).length}/4 parsed`, false, OLLAMA_MODEL);
+      logApi("Ghosts", `success (try ${attempt + 1}/${TRIES}) — ${Object.keys(parsed).length}/4 parsed`, false, GEMINI_GHOSTS_MODEL);
       success = true;
       break;
     } catch (e) {
       console.log(`[OmegaPacman] Ghosts try ${attempt + 1}/${TRIES} failed: ${e.message}`);
-      logApi("Ghosts", `try ${attempt + 1}/${TRIES} failed: ${oneLine(e.message)}`, true, OLLAMA_MODEL);
+      logApi("Ghosts", `try ${attempt + 1}/${TRIES} failed: ${oneLine(e.message)}`, true, GEMINI_GHOSTS_MODEL);
       if (attempt < TRIES - 1) await sleep(500 * Math.pow(2, attempt) + Math.random() * 400);
     }
   }
-  if (!success) logApi("Ghosts", `fallback — all ${TRIES} Ollama tries failed; each ghost moves randomly`, true, OLLAMA_MODEL);
+  if (!success) logApi("Ghosts", `fallback — all ${TRIES} Gemini tries failed; each ghost moves randomly`, true, GEMINI_GHOSTS_MODEL);
 
   return GHOSTS.map(g => {
     const p = parsed[g.key];
     if (p) return { g, move: p.move, dir: p.dir, reason: p.reason, fallback: false };
     const legal = moveOptions(g.pos, false);
     const mv = legal.length ? pickRandom(legal) : { ...g.pos };
-    if (success) logApi(g.name, `missing/illegal in ghost reply — random fallback → ${dirOf(g.pos, mv)}`, true, OLLAMA_MODEL);
+    if (success) logApi(g.name, `missing/illegal in ghost reply — random fallback → ${dirOf(g.pos, mv)}`, true, GEMINI_GHOSTS_MODEL);
     return {
       g, move: mv, dir: dirOf(g.pos, mv),
-      reason: success ? "(random fallback — missing/illegal move)" : "(random fallback — Ollama unavailable)",
+      reason: success ? "(random fallback — missing/illegal move)" : "(random fallback — Gemini unavailable)",
       fallback: true,
     };
   });
 }
 
-// Build the textual decision context handed to Grok for Pac-Man. Pac-Man has
+// Build the textual decision context handed to Gemini for Pac-Man. Pac-Man has
 // NO notes/memory — only the live game state goes in.
 function buildPacmanContext() {
   const ghosts = GHOSTS.map(g => `${g.name} (${g.pos.r},${g.pos.c})`).join(", ");
@@ -972,9 +960,9 @@ function buildPacmanContext() {
   ].join("\n");
 }
 
-// Decide Pac-Man's move via Grok: same robust retry + random-legal fallback as
+// Decide Pac-Man's move via Gemini: same robust retry + random-legal fallback as
 // the ghosts. parseGhostReply works for any entity with a .pos (PACMAN has one).
-async function decidePacmanGrok(key) {
+async function decidePacmanGemini() {
   const legal = moveOptions(PACMAN.pos, false);
   if (!legal.length) return { move: { ...PACMAN.pos }, dir: "stay", reason: "no legal move", fallback: false };
 
@@ -985,20 +973,20 @@ async function decidePacmanGrok(key) {
   const TRIES = 5;
   for (let attempt = 0; attempt < TRIES; attempt++) {
     try {
-      const reply = await callGrok(messages, key);
+      const reply = await callGemini(messages, GEMINI_PACMAN_MODEL);
       const parsed = parseGhostReply(reply, PACMAN);
-      if (parsed) { logApi("Pac-Man", `success (try ${attempt + 1}/${TRIES})`, false); return { ...parsed, fallback: false }; }
+      if (parsed) { logApi("Pac-Man", `success (try ${attempt + 1}/${TRIES})`, false, GEMINI_PACMAN_MODEL); return { ...parsed, fallback: false }; }
       throw new Error("unparseable/illegal reply: " + oneLine(reply));
     } catch (e) {
       console.log(`[OmegaPacman] Pac-Man try ${attempt + 1}/${TRIES} failed: ${e.message}`);
-      logApi("Pac-Man", `try ${attempt + 1}/${TRIES} failed: ${oneLine(e.message)}`, true);
+      logApi("Pac-Man", `try ${attempt + 1}/${TRIES} failed: ${oneLine(e.message)}`, true, GEMINI_PACMAN_MODEL);
       if (attempt < TRIES - 1) await sleep(500 * Math.pow(2, attempt) + Math.random() * 400);
     }
   }
   const mv = pickRandom(legal);
   console.log(`[OmegaPacman] Pac-Man: all ${TRIES} tries failed — random fallback ${dirOf(PACMAN.pos, mv)}`);
-  logApi("Pac-Man", `fallback-to-random → ${dirOf(PACMAN.pos, mv)} (all ${TRIES} Grok tries failed)`, true);
-  return { move: mv, dir: dirOf(PACMAN.pos, mv), reason: "(random fallback — Grok unavailable)", fallback: true };
+  logApi("Pac-Man", `fallback-to-random → ${dirOf(PACMAN.pos, mv)} (all ${TRIES} Gemini tries failed)`, true, GEMINI_PACMAN_MODEL);
+  return { move: mv, dir: dirOf(PACMAN.pos, mv), reason: "(random fallback — Gemini unavailable)", fallback: true };
 }
 
 // The big top label carries the LIVE status of the actor in play: who is
@@ -1041,7 +1029,7 @@ function escapeHtml(s) {
 }
 
 // ===================================================================
-// Learning (Reflexion) — after each game, ONE Grok call reads the game's
+// Learning (Reflexion) — after each game, ONE Gemini call reads the game's
 // transcript + the current 5 .md and REWRITES all 5 so the ghosts improve.
 // Only ghosts learn; Pac-Man has no .md.
 // ===================================================================
@@ -1123,7 +1111,7 @@ function applyLearning(blocks) {
 // ONE learning call with the same robust retry + fallback as the move calls.
 // Logs an "Learning" API row (success / try-failed / fallback) so the run is
 // confirmable; on total failure the notes are left unchanged.
-async function learnFromGame(win, key) {
+async function learnFromGame(win) {
   const messages = [
     { role: "system", content: "You improve four cooperating ghosts' strategy notes after each game so they catch Pac-Man faster. Reply only in the exact delimited format requested." },
     { role: "user", content: buildLearningContext(win) },
@@ -1131,19 +1119,19 @@ async function learnFromGame(win, key) {
   const TRIES = 4;
   for (let attempt = 0; attempt < TRIES; attempt++) {
     try {
-      const reply = await callGrok(messages, key);
+      const reply = await callGemini(messages, GEMINI_LEARN_MODEL);
       const blocks = parseLearning(reply);
       if (!Object.keys(blocks).length) throw new Error("no notes parsed: " + oneLine(reply));
       const n = applyLearning(blocks);
-      logApi("Learning", `success (try ${attempt + 1}/${TRIES}) — ${n}/5 notes rewritten`, false);
+      logApi("Learning", `success (try ${attempt + 1}/${TRIES}) — ${n}/5 notes rewritten`, false, GEMINI_LEARN_MODEL);
       return;
     } catch (e) {
       console.log(`[OmegaPacman] Learning try ${attempt + 1}/${TRIES} failed: ${e.message}`);
-      logApi("Learning", `try ${attempt + 1}/${TRIES} failed: ${oneLine(e.message)}`, true);
+      logApi("Learning", `try ${attempt + 1}/${TRIES} failed: ${oneLine(e.message)}`, true, GEMINI_LEARN_MODEL);
       if (attempt < TRIES - 1) await sleep(500 * Math.pow(2, attempt) + Math.random() * 400);
     }
   }
-  logApi("Learning", `fallback — notes unchanged (all ${TRIES} Grok tries failed)`, true);
+  logApi("Learning", `fallback — notes unchanged (all ${TRIES} Gemini tries failed)`, true, GEMINI_LEARN_MODEL);
 }
 
 // ---- per-round metrics --------------------------------------------------
@@ -1230,7 +1218,7 @@ function restore(s) {
 
 // ---- transport controls: << (back), Play/Pause, >> (forward) ------------
 // Forward = one SUB-TURN: the current actor moves, then the pointer advances.
-// Async because ghost moves call Grok. `stepping` guards against re-entry.
+// Async because ghost moves call Gemini. `stepping` guards against re-entry.
 let stepping = false;
 let playing = false;
 
@@ -1248,12 +1236,12 @@ async function doSubTurn() {
   const PAC = { name: "Pac-Man", color: "var(--pac)" };   // for the status label
   if (i === 0) {
     let dec;
-    if (game.apiKey) {
+    if (apiKey()) {
       setThinking(PAC);
-      dec = await decidePacmanGrok(game.apiKey);   // Grok decides Pac-Man's move
+      dec = await decidePacmanGemini();            // Gemini decides Pac-Man's move
       if (game.status !== "playing") return;       // game was reset mid-call
     } else {
-      logApi("Pac-Man", "no API key — random move (no Grok call)", true);
+      logApi("Pac-Man", "no API key — random move (no Gemini call)", true, GEMINI_PACMAN_MODEL);
       const opts = moveOptions(PACMAN.pos, false);
       const mv = opts.length ? pickRandom(opts) : { ...PACMAN.pos };
       dec = { move: mv, dir: dirOf(PACMAN.pos, mv), reason: "(no API key — random move)", fallback: true };
@@ -1263,10 +1251,20 @@ async function doSubTurn() {
     showMoveInfo(PAC, dec);                         // "Pac-Man → left · …"
     recordTurn("Pac-Man", dec.dir, dec.reason);
   } else {
-    // Ghosts run on the local Ollama model — no API key needed, always attempt it.
+    // Ghosts decided by ONE Gemini call (needs the API key, like Pac-Man).
     setTurnLabel("Ghosts are deciding…", "var(--accent)", true);
-    const decs = await decideGhostsOllama();        // ONE call decides all four
-    if (game.status !== "playing") return;          // game was reset mid-call
+    let decs;
+    if (apiKey()) {
+      decs = await decideGhostsGemini();            // ONE call decides all four
+      if (game.status !== "playing") return;        // game was reset mid-call
+    } else {
+      logApi("Ghosts", "no API key — random moves (no Gemini call)", true, GEMINI_GHOSTS_MODEL);
+      decs = GHOSTS.map(g => {
+        const opts = moveOptions(g.pos, false);
+        const mv = opts.length ? pickRandom(opts) : { ...g.pos };
+        return { g, move: mv, dir: dirOf(g.pos, mv), reason: "(no API key — random move)", fallback: true };
+      });
+    }
     decs.forEach(d => {                              // apply all four together
       d.g.pos = d.move;
       game.score = Math.max(0, game.score - 1);      // each ghost move costs -1
@@ -1371,11 +1369,11 @@ async function endGame(win) {
   renderMetrics();
 
   // LEARNING: ghosts reflect on this game and rewrite their .md before the next
-  // round. Show "Ghosts are learning…" while the single Grok call runs, so the
+  // round. Show "Ghosts are learning…" while the single Gemini call runs, so the
   // updated notes are already visible in the Memory panel when the modal opens.
-  if (game.apiKey) {
+  if (apiKey()) {
     setTurnLabel("Ghosts are learning…", "var(--accent)", true);
-    await learnFromGame(win, game.apiKey);
+    await learnFromGame(win);
   }
   show("resultModal", true);                        // modal over the board (no page switch)
   scheduleAutoProceed();                            // if Auto is on, advance to the next round
@@ -1501,7 +1499,7 @@ document.getElementById("mdModalClose").addEventListener("click", () =>
 // ---- activity log (temporary debug tool) --------------------------------
 // Two streams kept in one chronological list that never auto-clears:
 //   • API   — every LLM call's outcome (success / try-failed / fallback), with
-//             the model used: ghosts = local Ollama, Pac-Man + Learning = Grok
+//             the Gemini model used (Pac-Man, Ghosts, or Learning)
 //   • MOVE  — every actor's decision (dir + reason), incl. Pac-Man
 const gameLog = [];   // {kind:'api'|'move', actor, msg, fallback, model?, round, turn}
 
@@ -1515,10 +1513,10 @@ function pushLog(entry) {
   gameLog.push(entry);
   if (logOpen()) renderLog();          // live-update if the popup is showing
 }
-// API rows record which model served the call: ghosts use the local Ollama
-// model, Pac-Man + Learning use Grok (default).
+// API rows record which Gemini model served the call (Pac-Man, Ghosts, or
+// Learning).
 function logApi(actor, msg, fallback, model) {
-  pushLog({ kind: "api", actor, msg, fallback: !!fallback, model: model || GROK_MODEL, round: game.round, turn: game.turn });
+  pushLog({ kind: "api", actor, msg, fallback: !!fallback, model: model || "", round: game.round, turn: game.turn });
 }
 function logMove(actor, dir, reason, fallback) {
   pushLog({ kind: "move", actor, msg: `→ ${dir} · ${reason}`, fallback: !!fallback, round: game.round, turn: game.turn });
@@ -1535,7 +1533,7 @@ function renderLog() {
       : `<span class="logtag move">MOVE</span>`;
     const meta  = `<span class="logmeta">R${e.round}·T${e.turn}</span>`;
     const actor = `<span class="logactor" style="color:${actorColor(e.actor)}">${escapeHtml(e.actor)}</span>`;
-    const model = e.kind === "api" ? `<span class="logmeta">${escapeHtml(e.model || GROK_MODEL)}</span>` : ``;
+    const model = e.kind === "api" ? `<span class="logmeta">${escapeHtml(e.model || "")}</span>` : ``;
     const msg   = `<span class="logmsg${e.fallback ? " fallback" : ""}">${escapeHtml(e.msg)}</span>`;
     return `<div class="logrow">${tag}${meta}${actor}${model}${msg}</div>`;
   }).join("");
