@@ -527,9 +527,11 @@
 
 <script>
 /* ===================================================================
-   OmegaPacman — STEP 2-1: real turn-based game (random ghosts; no LLM yet).
-   Pac-Man forages pellets while evading ghosts; the 4 ghosts move randomly
-   (Grok-driven moves come in 2-2). Real sub-turn controls + scoring + rounds.
+   OmegaPacman — STEP 2-3: every actor is Grok-driven. Each turn Pac-Man asks
+   Grok to pick a move to survive the ghosts while eating pellets, then the four
+   ghosts each ask Grok to pick a move to catch Pac-Man. Sequential resolution,
+   sub-turn controls, scoring, and rounds unchanged. Pac-Man has NO memory; the
+   ghosts carry .md notes but do not learn yet (learning is the next step).
    =================================================================== */
 
 // ---- world data ---------------------------------------------------------
@@ -545,10 +547,9 @@ const START = {
   pacman: { r: 5, c: 4 },
   ghosts: [ { r: 1, c: 1 }, { r: 1, c: 8 }, { r: 8, c: 1 }, { r: 8, c: 8 } ],
 };
-// Pac-Man policy: FORAGE-AND-EVADE — seek nearby pellets while keeping distance
-// from the nearest ghost (not pure random). Weighted: maximise
-// A*min(ghostDist, CAP) - B*pelletDist over candidate cells.
-const FLEE = { A: 2, B: 1, CAP: 4 };
+// Pac-Man is Grok-driven too: each turn Grok picks its move to survive the
+// ghosts while collecting pellets (see decidePacmanGrok). Pac-Man has NO .md /
+// no memory — it does not learn.
 
 // 10x10 maze (1=wall, 0=floor).
 const MAZE = [
@@ -672,48 +673,10 @@ function moveOptions(pos, includeStay) {
   return opts;
 }
 function pickRandom(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
-// Wall-aware BFS distance map from one or more source cells.
-function bfsDist(sources) {
-  const dist = new Map(), q = [];
-  for (const s of sources) { dist.set(keyOf(s.r, s.c), 0); q.push(s); }
-  while (q.length) {
-    const cur = q.shift(), d = dist.get(keyOf(cur.r, cur.c));
-    for (const nb of moveOptions(cur, false)) {
-      const k = keyOf(nb.r, nb.c);
-      if (!dist.has(k)) { dist.set(k, d + 1); q.push(nb); }
-    }
-  }
-  return dist;
-}
-const distAt = (m, cell) => m.get(keyOf(cell.r, cell.c)) ?? Infinity;
 
 // ===================================================================
-// Agents
+// Agents — both Pac-Man and the ghosts are decided by Grok (see below).
 // ===================================================================
-// Pac-Man: forage-and-evade — pick the reachable cell (or stay) maximising
-// A*min(ghostDist, CAP) - B*pelletDist; eats a pellet on landing.
-function pacmanMove() {
-  const options = moveOptions(PACMAN.pos, true);
-  const ghostMaps = GHOSTS.map(g => bfsDist([g.pos]));
-  const pelletMap = game.pellets.size
-    ? bfsDist([...game.pellets].map(k => { const [r, c] = k.split(",").map(Number); return { r, c }; }))
-    : null;
-  let best = -Infinity, bucket = [];
-  for (const cell of options) {
-    const gd = Math.min(...ghostMaps.map(m => distAt(m, cell)));
-    const pd = pelletMap ? distAt(pelletMap, cell) : 0;
-    const s = FLEE.A * Math.min(gd, FLEE.CAP) - FLEE.B * pd;
-    if (s > best) { best = s; bucket = [cell]; }
-    else if (s === best) bucket.push(cell);
-  }
-  PACMAN.pos = pickRandom(bucket);
-  game.pellets.delete(keyOf(PACMAN.pos.r, PACMAN.pos.c));   // forage
-}
-// Ghost: random legal move (Grok-driven in 2-2).
-function ghostMoveRandom(g) {
-  const opts = moveOptions(g.pos, false);
-  if (opts.length) g.pos = pickRandom(opts);
-}
 const caught = () => GHOSTS.some(g => samePos(g.pos, PACMAN.pos));
 
 // ===================================================================
@@ -815,6 +778,63 @@ async function decideGhostGrok(i, key) {
   const mv = pickRandom(legal);
   console.log(`[OmegaPacman] ${g.name}: all ${TRIES} tries failed — random fallback ${dirOf(g.pos, mv)}`);
   return { move: mv, dir: dirOf(g.pos, mv), reason: "(random fallback — Grok unavailable)", fallback: true };
+}
+
+// Build the textual decision context handed to Grok for Pac-Man. Pac-Man has
+// NO notes/memory — only the live game state goes in.
+function buildPacmanContext() {
+  const ghosts = GHOSTS.map(g => `${g.name} (${g.pos.r},${g.pos.c})`).join(", ");
+  const legal = ["up", "down", "left", "right"].map(dir => {
+    const [dr, dc] = DIRV[dir];
+    const r = PACMAN.pos.r + dr, c = PACMAN.pos.c + dc;
+    return isFloor(r, c) ? `${dir}→(${r},${c}) open` : `${dir}→wall`;
+  }).join(", ");
+  const pellets = game.pellets.size
+    ? [...game.pellets].map(k => `(${k})`).join(" ")
+    : "none left";
+  return [
+    `You are Pac-Man in a turn-based chase on a 10x10 grid (coordinates are row,col with row 0 at the top).`,
+    `Four ghosts are hunting you. You LOSE the instant a ghost moves onto your cell. It is your move.`,
+    `Survive as long as possible — keep away from the ghosts — while eating pellets when it is safe to.`,
+    ``,
+    `MAZE (#=wall, .=floor):`,
+    MAZE_TEXT,
+    ``,
+    `You, Pac-Man, are at (${PACMAN.pos.r},${PACMAN.pos.c}).`,
+    `Ghosts: ${ghosts}.`,
+    `Remaining pellets (${game.pellets.size}): ${pellets}.`,
+    `Your legal moves: ${legal}.`,
+    ``,
+    `Choose exactly ONE legal move (one that is "open", not a wall) that best avoids the ghosts while collecting pellets.`,
+    `Reply on a single line EXACTLY as:  MOVE: <up|down|left|right> | REASON: <one short sentence>`,
+  ].join("\n");
+}
+
+// Decide Pac-Man's move via Grok: same robust retry + random-legal fallback as
+// the ghosts. parseGhostReply works for any entity with a .pos (PACMAN has one).
+async function decidePacmanGrok(key) {
+  const legal = moveOptions(PACMAN.pos, false);
+  if (!legal.length) return { move: { ...PACMAN.pos }, dir: "stay", reason: "no legal move", fallback: false };
+
+  const messages = [
+    { role: "system", content: "You are Pac-Man trying to survive four hunting ghosts in a maze while eating pellets. Think briefly, then answer in the exact requested format." },
+    { role: "user", content: buildPacmanContext() },
+  ];
+  const TRIES = 5;
+  for (let attempt = 0; attempt < TRIES; attempt++) {
+    try {
+      const reply = await callGrok(messages, key);
+      const parsed = parseGhostReply(reply, PACMAN);
+      if (parsed) return { ...parsed, fallback: false };
+      throw new Error("unparseable/illegal reply: " + oneLine(reply));
+    } catch (e) {
+      console.log(`[OmegaPacman] Pac-Man try ${attempt + 1}/${TRIES} failed: ${e.message}`);
+      if (attempt < TRIES - 1) await sleep(500 * Math.pow(2, attempt) + Math.random() * 400);
+    }
+  }
+  const mv = pickRandom(legal);
+  console.log(`[OmegaPacman] Pac-Man: all ${TRIES} tries failed — random fallback ${dirOf(PACMAN.pos, mv)}`);
+  return { move: mv, dir: dirOf(PACMAN.pos, mv), reason: "(random fallback — Grok unavailable)", fallback: true };
 }
 
 // The big top label carries the LIVE status of the actor in play: who is
@@ -921,15 +941,21 @@ async function doSubTurn() {
   history.push(snapshot());
   const i = game.actor;
 
+  const PAC = { name: "Pac-Man", color: "var(--pac)" };   // for the status label
   if (i === 0) {
-    const from = { ...PACMAN.pos };
-    pacmanMove();                                  // Pac-Man: forage-and-evade (local)
-    const dir = dirOf(from, PACMAN.pos);
-    setTurnLabel(                                   // big label carries Pac-Man's move
-      dir === "stay"
-        ? `<span class="tl-actor">Pac-Man holds position</span>`
-        : `<span class="tl-actor">Pac-Man → ${dir}</span>`,
-      "var(--pac)", false);
+    let dec;
+    if (game.apiKey) {
+      setThinking(PAC);
+      dec = await decidePacmanGrok(game.apiKey);   // Grok decides Pac-Man's move
+      if (game.status !== "playing") return;       // game was reset mid-call
+    } else {
+      const opts = moveOptions(PACMAN.pos, false);
+      const mv = opts.length ? pickRandom(opts) : { ...PACMAN.pos };
+      dec = { move: mv, dir: dirOf(PACMAN.pos, mv), reason: "(no API key — random move)", fallback: true };
+    }
+    PACMAN.pos = dec.move;
+    game.pellets.delete(keyOf(PACMAN.pos.r, PACMAN.pos.c));   // eat pellet on landing
+    showMoveInfo(PAC, dec);                         // "Pac-Man → left · …"
   } else {
     const g = GHOSTS[i - 1];
     let dec;
