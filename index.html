@@ -1242,6 +1242,7 @@ function startRound(roundNum) {
     for (let c = 0; c < SIZE; c++)
       if (isFloor(r, c) && !occupied(r, c)) game.pellets.add(keyOf(r, c));
   game.transcript = [];                   // fresh game log for this round's learning
+  currentGameMoves = [];                  // fresh per-game MOVE buffer (rolling 10-game window)
   history = [];
   setPlaying(false);
   buildBoard();
@@ -1428,6 +1429,7 @@ async function endGame(win) {
   setPlaying(false);
   renderGame();                                    // show the final board state
   recordMetric(win);                               // append this round to the metrics list
+  collectGameLog();                                // roll this game's MOVE log into the 10-game buffer
   const v = document.getElementById("resVerdict");
   v.textContent = win ? "VICTORY" : "DEFEAT";
   v.className = "verdict " + (win ? "win" : "lose");
@@ -1569,6 +1571,35 @@ document.getElementById("mdModalClose").addEventListener("click", () =>
 //   • MOVE  — every actor's decision (dir + reason), incl. Pac-Man
 const gameLog = [];   // {kind:'api'|'move', actor, msg, fallback, model?, round, turn}
 
+// ---- rolling per-game MOVE-log buffer (for the upcoming every-10-games learning) --
+// The on-screen gameLog accumulates ALL entries (API + MOVE) across every game and
+// never auto-resets, but it is one mixed stream with no per-game boundaries. This
+// buffer instead keeps each COMPLETED game's MOVE log (with from->to coords) as its
+// own string, in a rolling window of the last GAMES_PER_BATCH games — so the last
+// 10 games are available as a clean, separated string. gameCount/buffer are
+// session-global (they persist across rounds AND series), so "every 10 games" is
+// continuous co-evolution, not per-series.
+let gameCount = 0;                 // completed games this session
+let currentGameMoves = [];         // MOVE lines for the in-progress game (reset each game)
+const gameLogsBuffer = [];         // rolling window: the last N games' MOVE-log strings
+const GAMES_PER_BATCH = 10;
+
+// Called once per completed game (from endGame): snapshot this game's MOVE log into
+// the rolling buffer; after every 10th game, assemble the last 10 games into one
+// clearly separated string and log it. (No server call yet — that comes next.)
+function collectGameLog() {
+  gameCount += 1;
+  gameLogsBuffer.push(currentGameMoves.length ? currentGameMoves.join("\n") : "(no moves recorded)");
+  if (gameLogsBuffer.length > GAMES_PER_BATCH) gameLogsBuffer.shift();   // keep only the last 10
+  if (gameCount % GAMES_PER_BATCH === 0) {
+    const startNum = gameCount - gameLogsBuffer.length + 1;             // absolute game number of buffer[0]
+    const assembled = gameLogsBuffer
+      .map((g, i) => `=== GAME ${startNum + i} ===\n${g}`)
+      .join("\n\n");
+    console.log(`[OmegaPacman] ${gameCount} games completed — assembled MOVE log of the last ${gameLogsBuffer.length} games:\n\n${assembled}`);
+  }
+}
+
 function actorColor(name) {
   if (name === "Pac-Man") return "var(--pac)";
   const g = GHOSTS.find(x => x.name === name);
@@ -1589,6 +1620,8 @@ function logApi(actor, msg, fallback, model) {
 function logMove(actor, from, to, dir, reason, fallback) {
   const coords = `(${from.r},${from.c})→(${to.r},${to.c})`;
   pushLog({ kind: "move", actor, msg: `${coords} ${dir} · ${reason}`, fallback: !!fallback, round: game.round, turn: game.turn });
+  // Self-contained per-game MOVE line for the rolling buffer (turn + actor + coords).
+  currentGameMoves.push(`T${game.turn} ${actor} ${coords} ${dir} · ${oneLine(reason)}`);
 }
 function renderLog() {
   const body = document.getElementById("logBody");
