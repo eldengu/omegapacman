@@ -264,6 +264,8 @@
     max-width: 100%;
   }
   .boardctrls { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+  #autoBtn.on { background: var(--accent); color: #1a1a00; border-color: #b9a200; font-weight: bold; }
+  #autoBtn.on:hover { background: #fff04d; }
 
   /* memory panel: TOP (per-actor, auto-switching) + BOTTOM (team, fixed) */
   #memorypane {
@@ -499,6 +501,7 @@
           <button id="fwdBtn" title="Step forward one turn">&raquo;</button>
           <button id="textToggle" title="Switch board / text view">Text view</button>
           <button id="logToggle" title="Open the activity log (debug)">Log</button>
+          <button id="autoBtn" title="Auto-play the whole series of rounds">🔁 Auto: Off</button>
         </div>
       </div>
 
@@ -720,11 +723,10 @@ document.getElementById("playBtn").addEventListener("click", () => {
 // The board stays mounted behind the modal, so we only dismiss + reset — no
 // hard screen switch.
 document.getElementById("againBtn").addEventListener("click", () => {
-  show("resultModal", false);
-  if (game.round < game.rounds) startRound(game.round + 1);
-  else startRound(1);
+  gotoRound(game.round < game.rounds ? game.round + 1 : 1);   // cancels any pending auto-proceed
 });
 document.getElementById("resultMenu").addEventListener("click", () => {
+  cancelAutoProceed();
   show("resultModal", false);
   setPlaying(false);
   showScreen("start");
@@ -1121,6 +1123,7 @@ function renderMetrics() {
 // ===================================================================
 function startGame() {                 // begin a fresh series at round 1
   metrics = [];                        // reset the per-round metrics for the new series
+  auto = false; cancelAutoProceed(); renderAutoBtn();   // each new series starts in manual mode
   startRound(1);
 }
 function startRound(roundNum) {
@@ -1257,9 +1260,10 @@ function stepBackward() {
 
 // Play = auto-advance via a self-scheduling loop (waits for each async sub-turn).
 function setPlaying(on) {
+  const was = playing;
   playing = on;
   document.getElementById("playBtn2").innerHTML = on ? "&#10073;&#10073; Pause" : "&#9654; Play";
-  if (on) playLoop();
+  if (on && !was) playLoop();          // never start a second concurrent loop
 }
 async function playLoop() {
   while (playing && game.status === "playing") {
@@ -1272,6 +1276,47 @@ async function playLoop() {
 document.getElementById("fwdBtn").addEventListener("click", () => { setPlaying(false); stepForward(); });
 document.getElementById("backBtn").addEventListener("click", () => { setPlaying(false); stepBackward(); });
 document.getElementById("playBtn2").addEventListener("click", () => setPlaying(!playing));
+
+// ---- AUTO-PLAY: run the whole series of rounds hands-free ----------------
+// When ON: each round auto-advances (like Play); when a round ends the result
+// modal shows briefly, then the next round starts automatically — until the
+// configured number of rounds is reached, where it stops on the final modal.
+let auto = false;
+let autoTimer = null;
+const AUTO_DELAY = 2500;   // ms the result modal lingers before the next round
+
+function renderAutoBtn() {
+  const b = document.getElementById("autoBtn");
+  b.classList.toggle("on", auto);
+  b.innerHTML = auto ? "🔁 Auto: On" : "🔁 Auto: Off";
+  b.title = auto ? "Auto-playing the series — click to turn off" : "Auto-play the whole series of rounds";
+}
+function cancelAutoProceed() { if (autoTimer) { clearTimeout(autoTimer); autoTimer = null; } }
+function scheduleAutoProceed() {
+  cancelAutoProceed();
+  if (auto && game.status === "over" && game.round < game.rounds) {
+    autoTimer = setTimeout(() => { autoTimer = null; gotoRound(game.round + 1); }, AUTO_DELAY);
+  }
+}
+// Start a round, dismissing the result modal; auto-advance its turns when Auto is on.
+function gotoRound(n) {
+  cancelAutoProceed();
+  show("resultModal", false);
+  startRound(n);
+  if (auto) setPlaying(true);
+}
+function setAuto(on) {
+  auto = on;
+  renderAutoBtn();
+  if (on) {
+    if (game.status === "playing") setPlaying(true);        // auto-advance the current round
+    else if (game.status === "over") scheduleAutoProceed(); // resume the series from the modal
+  } else {
+    cancelAutoProceed();
+    setPlaying(false);                                       // back to manual control
+  }
+}
+document.getElementById("autoBtn").addEventListener("click", () => setAuto(!auto));
 
 async function endGame(win) {
   game.status = "over";
@@ -1296,6 +1341,7 @@ async function endGame(win) {
     await learnFromGame(win, game.apiKey);
   }
   show("resultModal", true);                        // modal over the board (no page switch)
+  scheduleAutoProceed();                            // if Auto is on, advance to the next round
 }
 
 // ---- board rendering (graphical) ----------------------------------------
@@ -1476,6 +1522,7 @@ document.getElementById("menuApiKey").addEventListener("click", () => {
 });
 document.getElementById("menuQuit").addEventListener("click", () => {
   show("settingsMenu", false);
+  cancelAutoProceed();
   setPlaying(false);
   showScreen("start");
 });
