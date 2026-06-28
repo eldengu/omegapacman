@@ -1797,10 +1797,11 @@ async function collectGameLog() {
 
 // Ghost TRAINING via a DIRECT browser call to Gemini (GHOST_MODEL), the same
 // mechanism as the move calls — no Antigravity, no /analyze, no server round-trip.
-// Sends the round's game log, asks the model to analyze it (where Pac-Man was
-// caught/slipped, where the ghosts clustered vs spread, pincer vs gap), and reply
-// with the five delimited blocks; parsed exactly as before to overwrite the five
-// ghost notes. ~4 tries with backoff; on failure the old .md are kept (never crash).
+// Sends the round's game log and asks the model to analyze it for AGGRESSIVE
+// PURSUIT — how to chase Pac-Man down and converge on him from multiple sides to
+// trap him FASTER (never passive zone-guarding/waiting) — and reply with the five
+// delimited blocks; parsed exactly as before to overwrite the five ghost notes.
+// ~4 tries with backoff; on failure the old .md are kept (never crash).
 async function trainGhosts(logText) {
   const currentNotes = [
     `===ATLANTA===`, (MEMORY.atlanta || "").trim(),
@@ -1812,7 +1813,7 @@ async function trainGhosts(logText) {
   ].join("\n");
   const user = [
     `You are the shared learning module for four ghosts (Atlanta, Berkeley, Chicago, Delaware) that cooperate to catch Pac-Man on a 14x34 maze (14 rows, 34 cols; coordinates row,col with row 0 at the top).`,
-    `A game just finished. Study the move-by-move GAME LOG below and ANALYZE it: where did Pac-Man get caught (or slip away)? Where did the ghosts cluster together vs spread out? Did a pincer close in, or did Pac-Man escape through a gap? Then REWRITE all five strategy notes so the ghosts catch Pac-Man FASTER next game.`,
+    `A game just finished. Study the move-by-move GAME LOG below and ANALYZE it for how the ghosts can catch Pac-Man FASTER next time by HUNTING HIM DOWN. On which turns were the ghosts too far from Pac-Man, or moving AWAY from him instead of toward him? Where did they hesitate, hold position, or drift toward a corner instead of closing in? Where did Pac-Man slip through because the ghosts failed to converge on his cell from multiple sides at once? Then REWRITE all five strategy notes to make the ghosts MORE AGGRESSIVE — chase Pac-Man directly and tighten the net so they trap him in FEWER turns.`,
     ``,
     `MAZE (#=wall, .=floor):`,
     MAZE_TEXT,
@@ -1823,7 +1824,7 @@ async function trainGhosts(logText) {
     `CURRENT NOTES:`,
     currentNotes,
     ``,
-    `Write concrete, human-readable guidance in plain language about positions and directions — which way each ghost should head, how to spread out and pincer, where to cut off escape routes, how pellets pull Pac-Man. Do NOT invent fixed keyword commands. Add brief "# reason" lines explaining each idea. Each ghost note is personal to that ghost; the team note is shared coordination they all read.`,
+    `Write concrete, human-readable guidance in plain language about AGGRESSIVE PURSUIT. Every ghost should: move TOWARD Pac-Man's current cell every single turn (shrink the row+col distance to him), converge on him from DIFFERENT sides so he ends up surrounded with no open escape direction, cut off the floor cell he is most likely to flee to next, and keep tightening the ring so the gap to him shrinks each turn. NEVER tell a ghost to sit still, wait, hold a position, guard a quadrant or zone, patrol, or camp in a corner — passive zone defense lets Pac-Man escape and is FORBIDDEN. Do NOT divide the maze into territories. Add brief "# reason" lines explaining each idea. Each ghost note is that ghost's personal pursuit plan (e.g. which side it should approach from to help surround Pac-Man); the team note is shared coordination for closing in and trapping him together as fast as possible.`,
     `Reply EXACTLY in this delimited format and nothing else (no JSON, no code fences):`,
     `===ATLANTA===`, `<atlanta notes>`,
     `===BERKELEY===`, `<berkeley notes>`,
@@ -1833,7 +1834,7 @@ async function trainGhosts(logText) {
     `===END===`,
   ].join("\n");
   const messages = [
-    { role: "system", content: "You improve four cooperating ghosts' strategy notes after each game so they catch Pac-Man faster. Reply only in the exact delimited format requested." },
+    { role: "system", content: "You improve four cooperating ghosts' strategy notes after each game so they HUNT DOWN and trap Pac-Man in as few turns as possible — aggressive pursuit and convergence on his position, NEVER passive zone-guarding or waiting. Reply only in the exact delimited format requested." },
     { role: "user", content: user },
   ];
   const TRIES = 4;
