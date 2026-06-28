@@ -16,12 +16,12 @@
     --wall: #1f3bff;
     --wall-edge: #7d96ff;
     --floor: #05051a;
-    --cell: 40px;
-    --cols: 20;
-    --rows: 8;
-    /* outer box = cells + (count-1) gaps(2px) + padding(6px*2). 20 cols -> +50px, 8 rows -> +26px */
-    --board-w: calc(var(--cell) * 20 + 50px);
-    --board-h: calc(var(--cell) * 8 + 26px);
+    --cell: 30px;              /* smaller cell so 34 cols fit the title-box width (~1100px) */
+    --cols: 34;
+    --rows: 14;
+    /* outer box = cells + (count-1) gaps(2px) + padding(6px*2). 34 cols -> +78px, 14 rows -> +38px */
+    --board-w: calc(var(--cell) * 34 + 78px);
+    --board-h: calc(var(--cell) * 14 + 38px);
     --membox-h: 170px;   /* fixed memory-box height so tabs don't resize the panel */
     /* entity colors */
     --pac: #ffe000;
@@ -205,8 +205,8 @@
     width: var(--board-w);
     height: var(--board-h);
     display: grid;
-    grid-template-columns: repeat(20, var(--cell));
-    grid-template-rows: repeat(8, var(--cell));
+    grid-template-columns: repeat(34, var(--cell));
+    grid-template-rows: repeat(14, var(--cell));
     gap: 2px;
     background: #000;
     padding: 6px;
@@ -219,11 +219,18 @@
     border-radius: 4px;
     display: flex; align-items: center; justify-content: center;
   }
+  /* Walls render as thin neon-blue LINES (not filled blocks): transparent cell
+     interior, with a glowing stroke drawn only on the sides that face floor (set
+     per-cell in buildBoard). drop-shadow follows the strokes so only the lines glow. */
   .cell.wall {
-    background: var(--wall);
-    border: 2px solid var(--wall-edge);
-    box-shadow: inset 0 0 6px rgba(0,0,0,0.55);
+    background: transparent;
+    border-radius: 0;
+    filter: drop-shadow(0 0 2px var(--wall-edge)) drop-shadow(0 0 5px rgba(91,140,255,0.5));
   }
+  .cell.wall.wt { border-top:    3px solid var(--wall-edge); }
+  .cell.wall.wb { border-bottom: 3px solid var(--wall-edge); }
+  .cell.wall.wl { border-left:   3px solid var(--wall-edge); }
+  .cell.wall.wr { border-right:  3px solid var(--wall-edge); }
   .pellet { width: 16%; height: 16%; border-radius: 50%; background: #ffd9a0; }
   .pac {
     width: 74%; height: 74%; border-radius: 50%; background: var(--pac);
@@ -620,36 +627,42 @@
 // ---- world data ---------------------------------------------------------
 const GHOSTS = [
   { key: "atlanta",  name: "Atlanta",  color: "var(--atlanta)",  pos: { r: 1, c: 1 } },
-  { key: "berkeley", name: "Berkeley", color: "var(--berkeley)", pos: { r: 1, c: 18 } },
-  { key: "chicago",  name: "Chicago",  color: "var(--chicago)",  pos: { r: 6, c: 1 } },
-  { key: "delaware", name: "Delaware", color: "var(--delaware)", pos: { r: 6, c: 18 } },
+  { key: "berkeley", name: "Berkeley", color: "var(--berkeley)", pos: { r: 1, c: 32 } },
+  { key: "chicago",  name: "Chicago",  color: "var(--chicago)",  pos: { r: 12, c: 1 } },
+  { key: "delaware", name: "Delaware", color: "var(--delaware)", pos: { r: 12, c: 32 } },
 ];
-const PACMAN = { pos: { r: 4, c: 10 } };
+const PACMAN = { pos: { r: 7, c: 17 } };
 // Fixed start positions, reset at the start of every round (Pac-Man centre, ghosts
-// in the four interior corners of the low-wide grid).
+// in the four interior corners of the maze).
 const START = {
-  pacman: { r: 4, c: 10 },
-  ghosts: [ { r: 1, c: 1 }, { r: 1, c: 18 }, { r: 6, c: 1 }, { r: 6, c: 18 } ],
+  pacman: { r: 7, c: 17 },
+  ghosts: [ { r: 1, c: 1 }, { r: 1, c: 32 }, { r: 12, c: 1 }, { r: 12, c: 32 } ],
 };
 // Pac-Man is Gemini-driven: each turn its model picks a move to survive while
 // collecting pellets (see decidePacman). Pac-Man reads its FIXED pacman.md rule and
 // does NOT learn — only the ghosts learn (via Antigravity).
 
-// 8 rows x 20 cols arena (1=wall, 0=floor) — a low, wide rectangle. For now it's an
-// open rectangle with only a wall border — no interior maze walls / power-pellets /
-// jail / fruit yet (those come next).
-const MAZE = [
-  [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
-  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
-  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
-  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
-  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
-  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
-  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
-  [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
+// 14 rows x 34 cols maze (1=wall, 0=floor). The interior letters spell "CODE".
+// Fully connected, zero dead-ends. Built from ASCII so it matches the design exactly.
+const MAZE_ASCII = [
+  "##################################",
+  "#................................#",
+  "#................................#",
+  "#................................#",
+  "#....###....###...####...#####...#",
+  "#...#...#..#####..#####..####....#",
+  "#...#......#####..#####..####....#",
+  "#...#...#..#####..#####..####....#",
+  "#....###....###...####...#####...#",
+  "#................................#",
+  "#................................#",
+  "#................................#",
+  "#................................#",
+  "##################################",
 ];
-const ROWS = 8, COLS = 20;
-const MAZE_TEXT = MAZE.map(row => row.map(v => (v ? "#" : ".")).join("")).join("\n");
+const MAZE = MAZE_ASCII.map(row => [...row].map(ch => (ch === "#" ? 1 : 0)));
+const ROWS = 14, COLS = 34;
+const MAZE_TEXT = MAZE_ASCII.join("\n");
 
 // ---- Gemini (Google AI Studio, OpenAI-compatible) config ----------------
 // Both agents run on Gemini's OpenAI-compatible endpoint with the AI Studio
@@ -815,7 +828,7 @@ function buildGhostsContext() {
     (MEMORY[g.key] || "").trim(),
   ].join("\n")).join("\n\n");
   return [
-    `You control ALL FOUR ghosts (Atlanta, Berkeley, Chicago, Delaware) cooperating to catch Pac-Man on a 8x20 grid (8 rows, 20 cols; coordinates row,col with row 0 at the top).`,
+    `You control ALL FOUR ghosts (Atlanta, Berkeley, Chicago, Delaware) cooperating to catch Pac-Man on a 14x34 grid (14 rows, 34 cols; coordinates row,col with row 0 at the top).`,
     `The four ghosts move SIMULTANEOUSLY this turn. The ghosts win by moving onto Pac-Man's cell.`,
     ``,
     `MAZE (#=wall, .=floor):`,
@@ -953,7 +966,7 @@ function buildPacmanContext() {
     ? [...game.pellets].map(k => `(${k})`).join(" ")
     : "none left";
   return [
-    `You are Pac-Man in a turn-based chase on a 8x20 grid (8 rows, 20 cols; coordinates are row,col with row 0 at the top).`,
+    `You are Pac-Man in a turn-based chase on a 14x34 grid (14 rows, 34 cols; coordinates are row,col with row 0 at the top).`,
     `Four ghosts are hunting you. You LOSE the instant a ghost moves onto your cell. It is your move.`,
     `Survive as long as possible — keep away from the ghosts — while eating pellets when it is safe to.`,
     ``,
@@ -1063,7 +1076,7 @@ function buildLearningContext(win) {
     ? `OUTCOME: the ghosts WON — they caught Pac-Man on turn ${game.turn}. Final score ${game.score} (higher = caught faster).`
     : `OUTCOME: the ghosts LOST — Pac-Man survived all ${MAX_TURN} turns. Final score ${game.score}.`;
   return [
-    `You are the shared learning module for four ghosts (Atlanta, Berkeley, Chicago, Delaware) that cooperate to catch Pac-Man on a 8x20 maze (8 rows, 20 cols; coordinates row,col with row 0 at the top).`,
+    `You are the shared learning module for four ghosts (Atlanta, Berkeley, Chicago, Delaware) that cooperate to catch Pac-Man on a 14x34 maze (14 rows, 34 cols; coordinates row,col with row 0 at the top).`,
     `A game just finished. Study the move-by-move transcript and the current strategy notes, then REWRITE all five notes so the ghosts catch Pac-Man FASTER next game.`,
     ``,
     `MAZE (#=wall, .=floor):`,
@@ -1157,7 +1170,7 @@ function buildPacmanLearningContext(win) {
     ? `OUTCOME: you (Pac-Man) were CAUGHT on turn ${game.turn}. Final score ${game.score} (higher = caught faster, which is BAD for you).`
     : `OUTCOME: you (Pac-Man) SURVIVED all ${MAX_TURN} turns and escaped the ghosts.`;
   return [
-    `You are Pac-Man, a solo agent learning to survive four cooperating ghosts on a 8x20 maze (8 rows, 20 cols; coordinates row,col with row 0 at the top) while eating pellets.`,
+    `You are Pac-Man, a solo agent learning to survive four cooperating ghosts on a 14x34 maze (14 rows, 34 cols; coordinates row,col with row 0 at the top) while eating pellets.`,
     `A game just finished. Study the move-by-move transcript and your current notes, then REWRITE your notes so you SURVIVE LONGER next game — avoid getting cornered, keep escape routes open, and only grab pellets when it is safe.`,
     ``,
     `MAZE (#=wall, .=floor):`,
@@ -1469,7 +1482,17 @@ function buildBoard() {
   for (let r = 0; r < ROWS; r++)
     for (let c = 0; c < COLS; c++) {
       const d = document.createElement("div");
-      d.className = "cell" + (MAZE[r][c] === 1 ? " wall" : "");
+      let cls = "cell";
+      if (MAZE[r][c] === 1) {
+        cls += " wall";
+        // Draw a neon line only on sides that face FLOOR (the maze outline); sides
+        // facing another wall or the board edge get none, so walls read as thin lines.
+        if (isFloor(r - 1, c)) cls += " wt";
+        if (isFloor(r + 1, c)) cls += " wb";
+        if (isFloor(r, c - 1)) cls += " wl";
+        if (isFloor(r, c + 1)) cls += " wr";
+      }
+      d.className = cls;
       d.id = `cell-${r}-${c}`;
       board.appendChild(d);
     }
