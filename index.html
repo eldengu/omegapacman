@@ -17,7 +17,11 @@
     --wall-edge: #7d96ff;
     --floor: #05051a;
     --cell: 40px;
-    --board-size: calc(var(--cell) * 10 + 30px);  /* board outer box (cells + gaps + padding) */
+    --cols: 16;
+    --rows: 10;
+    /* outer box = cells + (count-1) gaps(2px) + padding(6px*2). 16 cols -> +42px, 10 rows -> +30px */
+    --board-w: calc(var(--cell) * 16 + 42px);
+    --board-h: calc(var(--cell) * 10 + 30px);
     --membox-h: 170px;   /* fixed memory-box height so tabs don't resize the panel */
     /* entity colors */
     --pac: #ffe000;
@@ -186,20 +190,22 @@
     text-shadow: none;
   }
 
+  /* Top-to-bottom layout: status (above) -> wide maze -> memory panels row. */
   #gamerow {
     width: 100%;
     max-width: 1100px;
     display: flex;
+    flex-direction: column;
     gap: 20px;
-    align-items: flex-start;
+    align-items: center;
   }
   #boardpane { display: flex; flex-direction: column; gap: 12px; align-items: center; }
 
   #board {
-    width: var(--board-size);
-    height: var(--board-size);
+    width: var(--board-w);
+    height: var(--board-h);
     display: grid;
-    grid-template-columns: repeat(10, var(--cell));
+    grid-template-columns: repeat(16, var(--cell));
     grid-template-rows: repeat(10, var(--cell));
     gap: 2px;
     background: #000;
@@ -234,8 +240,8 @@
 
   /* Text view occupies the SAME box as the board (same size/position) */
   #textboard {
-    width: var(--board-size);
-    height: var(--board-size);
+    width: var(--board-w);
+    height: var(--board-h);
     margin: 0;
     background: #000;
     border-radius: 10px;
@@ -251,8 +257,8 @@
   .tb-grid {
     margin: 0;
     font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
-    font-size: 20px;
-    line-height: 1.45;
+    font-size: 16px;
+    line-height: 1.4;
     text-align: left;
     color: var(--ink);
   }
@@ -267,16 +273,18 @@
   #autoBtn.on { background: var(--accent); color: #1a1a00; border-color: #b9a200; font-weight: bold; }
   #autoBtn.on:hover { background: #fff04d; }
 
-  /* memory panel: TOP (per-actor, auto-switching) + BOTTOM (team, fixed) */
+  /* memory panels sit BELOW the maze, side by side: ghost memory LEFT, team RIGHT */
   #memorypane {
-    flex: 1;
-    min-width: 340px;
-    align-self: flex-start;     /* size to content; boxes have a fixed height */
+    width: 100%;
+    max-width: var(--board-w);  /* line up under the maze */
     display: flex;
-    flex-direction: column;
+    flex-direction: row;
+    align-items: flex-start;
     gap: 14px;
   }
   .mempanel {
+    flex: 1;
+    min-width: 0;               /* allow equal halves to shrink */
     background: var(--panel);
     border: 1px solid var(--edge);
     border-radius: 12px;
@@ -616,30 +624,32 @@ const GHOSTS = [
   { key: "chicago",  name: "Chicago",  color: "var(--chicago)",  pos: { r: 8, c: 1 } },
   { key: "delaware", name: "Delaware", color: "var(--delaware)", pos: { r: 8, c: 8 } },
 ];
-const PACMAN = { pos: { r: 5, c: 4 } };
-// Fixed start positions, reset at the start of every round.
+const PACMAN = { pos: { r: 5, c: 8 } };
+// Fixed start positions, reset at the start of every round (Pac-Man centre, ghosts
+// in the four interior corners of the wide grid).
 const START = {
-  pacman: { r: 5, c: 4 },
-  ghosts: [ { r: 1, c: 1 }, { r: 1, c: 8 }, { r: 8, c: 1 }, { r: 8, c: 8 } ],
+  pacman: { r: 5, c: 8 },
+  ghosts: [ { r: 1, c: 1 }, { r: 1, c: 14 }, { r: 8, c: 1 }, { r: 8, c: 14 } ],
 };
-// Pac-Man is Gemini-driven too: each turn its model picks a move to survive while
-// collecting pellets (see decidePacman). Pac-Man reads its own single pacman.md
-// and learns solo between rounds (see learnPacman).
+// Pac-Man is Gemini-driven: each turn its model picks a move to survive while
+// collecting pellets (see decidePacman). Pac-Man reads its FIXED pacman.md rule and
+// does NOT learn — only the ghosts learn (via Antigravity).
 
-// 10x10 maze (1=wall, 0=floor).
+// 10 rows x 16 cols arena (1=wall, 0=floor). For now it's an open rectangle with
+// only a wall border — no interior maze walls / power-pellets / jail / fruit yet.
 const MAZE = [
-  [1,1,1,1,1,1,1,1,1,1],
-  [1,0,0,0,1,0,0,0,0,1],
-  [1,0,1,0,1,0,1,1,1,1],
-  [1,0,1,0,0,0,0,0,0,1],
-  [1,0,1,1,1,1,1,1,0,1],
-  [1,0,0,0,0,0,0,1,0,1],
-  [1,1,1,1,1,0,1,1,0,1],
-  [1,0,0,0,1,0,0,0,0,1],
-  [1,0,1,0,0,0,1,1,0,1],
-  [1,1,1,1,1,1,1,1,1,1],
+  [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
+  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
 ];
-const SIZE = 10;
+const ROWS = 10, COLS = 16;
 const MAZE_TEXT = MAZE.map(row => row.map(v => (v ? "#" : ".")).join("")).join("\n");
 
 // ---- Gemini (Google AI Studio, OpenAI-compatible) config ----------------
@@ -657,12 +667,11 @@ function apiKey() {
 
 const DIRV = { up: [-1, 0], down: [1, 0], left: [0, -1], right: [0, 1] };
 
-// SKILL.md memory — READ-ONLY during play. Starts nearly empty: no strategy,
-// no predefined keywords. Gemini decides each move from the game state + these
-// notes, so early games look near-random (expected). Learning that fills these
-// in comes in STEP 3.
+// SKILL.md memory — READ-ONLY during play. Pac-Man's note is a FIXED rule (it does
+// not learn). The ghosts' notes start empty and are rewritten by the Antigravity
+// learning server after each game. So: fixed Pac-Man vs a learning ghost swarm.
 const MEMORY = {
-  pacman:   "# Pac-Man\n\n(no strategy yet — learning comes later)\n",
+  pacman:   "# Pac-Man (fixed rules)\n\nEat pellets, avoid ghosts, maximize distance from the nearest ghost.\n",
   atlanta:  "# Atlanta\n\n(no strategy yet — learning comes later)\n",
   berkeley: "# Berkeley\n\n(no strategy yet — learning comes later)\n",
   chicago:  "# Chicago\n\n(no strategy yet — learning comes later)\n",
@@ -751,7 +760,7 @@ document.getElementById("resultMenu").addEventListener("click", () => {
 // ===================================================================
 const keyOf = (r, c) => `${r},${c}`;
 const samePos = (a, b) => a.r === b.r && a.c === b.c;
-const isFloor = (r, c) => r >= 0 && r < SIZE && c >= 0 && c < SIZE && MAZE[r][c] === 0;
+const isFloor = (r, c) => r >= 0 && r < ROWS && c >= 0 && c < COLS && MAZE[r][c] === 0;
 function moveOptions(pos, includeStay) {
   const opts = includeStay ? [{ r: pos.r, c: pos.c }] : [];
   for (const [dr, dc] of [[-1,0],[1,0],[0,-1],[0,1]]) {
@@ -807,7 +816,7 @@ function buildGhostsContext() {
     (MEMORY[g.key] || "").trim(),
   ].join("\n")).join("\n\n");
   return [
-    `You control ALL FOUR ghosts (Atlanta, Berkeley, Chicago, Delaware) cooperating to catch Pac-Man on a 10x10 grid (coordinates row,col with row 0 at the top).`,
+    `You control ALL FOUR ghosts (Atlanta, Berkeley, Chicago, Delaware) cooperating to catch Pac-Man on a 10x16 grid (10 rows, 16 cols; coordinates row,col with row 0 at the top).`,
     `The four ghosts move SIMULTANEOUSLY this turn. The ghosts win by moving onto Pac-Man's cell.`,
     ``,
     `MAZE (#=wall, .=floor):`,
@@ -945,7 +954,7 @@ function buildPacmanContext() {
     ? [...game.pellets].map(k => `(${k})`).join(" ")
     : "none left";
   return [
-    `You are Pac-Man in a turn-based chase on a 10x10 grid (coordinates are row,col with row 0 at the top).`,
+    `You are Pac-Man in a turn-based chase on a 10x16 grid (10 rows, 16 cols; coordinates are row,col with row 0 at the top).`,
     `Four ghosts are hunting you. You LOSE the instant a ghost moves onto your cell. It is your move.`,
     `Survive as long as possible — keep away from the ghosts — while eating pellets when it is safe to.`,
     ``,
@@ -1055,7 +1064,7 @@ function buildLearningContext(win) {
     ? `OUTCOME: the ghosts WON — they caught Pac-Man on turn ${game.turn}. Final score ${game.score} (higher = caught faster).`
     : `OUTCOME: the ghosts LOST — Pac-Man survived all ${MAX_TURN} turns. Final score ${game.score}.`;
   return [
-    `You are the shared learning module for four ghosts (Atlanta, Berkeley, Chicago, Delaware) that cooperate to catch Pac-Man on a 10x10 maze (coordinates row,col with row 0 at the top).`,
+    `You are the shared learning module for four ghosts (Atlanta, Berkeley, Chicago, Delaware) that cooperate to catch Pac-Man on a 10x16 maze (10 rows, 16 cols; coordinates row,col with row 0 at the top).`,
     `A game just finished. Study the move-by-move transcript and the current strategy notes, then REWRITE all five notes so the ghosts catch Pac-Man FASTER next game.`,
     ``,
     `MAZE (#=wall, .=floor):`,
@@ -1149,7 +1158,7 @@ function buildPacmanLearningContext(win) {
     ? `OUTCOME: you (Pac-Man) were CAUGHT on turn ${game.turn}. Final score ${game.score} (higher = caught faster, which is BAD for you).`
     : `OUTCOME: you (Pac-Man) SURVIVED all ${MAX_TURN} turns and escaped the ghosts.`;
   return [
-    `You are Pac-Man, a solo agent learning to survive four cooperating ghosts on a 10x10 maze (coordinates row,col with row 0 at the top) while eating pellets.`,
+    `You are Pac-Man, a solo agent learning to survive four cooperating ghosts on a 10x16 maze (10 rows, 16 cols; coordinates row,col with row 0 at the top) while eating pellets.`,
     `A game just finished. Study the move-by-move transcript and your current notes, then REWRITE your notes so you SURVIVE LONGER next game — avoid getting cornered, keep escape routes open, and only grab pellets when it is safe.`,
     ``,
     `MAZE (#=wall, .=floor):`,
@@ -1179,7 +1188,8 @@ function parsePacmanLearning(text) {
   return body;
 }
 
-// ONE solo learning call for Pac-Man (PACMAN_MODEL), mirroring learnFromGame.
+// Pac-Man solo learning. CURRENTLY OFF — Pac-Man uses fixed rules and does not
+// learn. Kept here, unused, for easy re-enable. (Mirrors learnFromGame.)
 async function learnPacman(win) {
   const messages = [
     { role: "system", content: "You are Pac-Man improving your own survival notes after each game so you live longer. Reply only in the exact delimited format requested." },
@@ -1240,8 +1250,8 @@ function startRound(roundNum) {
   PACMAN.pos = { ...START.pacman };
   GHOSTS.forEach((g, i) => { g.pos = { ...START.ghosts[i] }; });
   game.pellets = new Set();
-  for (let r = 0; r < SIZE; r++)
-    for (let c = 0; c < SIZE; c++)
+  for (let r = 0; r < ROWS; r++)
+    for (let c = 0; c < COLS; c++)
       if (isFloor(r, c) && !occupied(r, c)) game.pellets.add(keyOf(r, c));
   game.transcript = [];                   // fresh game log for this round's learning
   currentGameMoves = [];                  // fresh per-game MOVE buffer (rolling 10-game window)
@@ -1441,16 +1451,13 @@ async function endGame(win) {
   again.textContent = game.round < game.rounds ? "Next Round" : "Play Again";
   renderMetrics();
 
-  // LEARNING (co-evolution) before the next round:
-  //   • Ghosts → the Antigravity server (collectGameLog → runAntigravityLearning),
-  //     which replaces the old Gemini ghost learning. Keyless; slow (1-2 min).
-  //   • Pac-Man → solo learning on Gemini (only when the key is set).
-  // Run them together; show "Antigravity analyzing…" while we wait, apply the .md
-  // when it returns, then continue. Updated notes show in the Memory panel.
+  // LEARNING before the next round: ONLY the ghosts learn, via the Antigravity
+  // server (collectGameLog → runAntigravityLearning). Pac-Man uses FIXED rules and
+  // does NOT learn (learnPacman is off). Antigravity is keyless and slow (1-2 min),
+  // so show "Antigravity analyzing…" while we wait, apply the .md when it returns,
+  // then continue. Updated notes show in the Memory panel.
   setTurnLabel("Antigravity analyzing…", "var(--accent)", true);
-  const learnTasks = [collectGameLog()];             // ghosts via Antigravity (every GAMES_PER_BATCH games)
-  if (apiKey()) learnTasks.push(learnPacman(win));    // Pac-Man solo learning on Gemini
-  await Promise.all(learnTasks);
+  await collectGameLog();                            // ghosts via Antigravity (every GAMES_PER_BATCH games)
 
   show("resultModal", true);                        // modal over the board (no page switch)
   scheduleAutoProceed();                            // if Auto is on, advance to the next round
@@ -1460,8 +1467,8 @@ async function endGame(win) {
 const board = document.getElementById("board");
 function buildBoard() {
   board.innerHTML = "";
-  for (let r = 0; r < SIZE; r++)
-    for (let c = 0; c < SIZE; c++) {
+  for (let r = 0; r < ROWS; r++)
+    for (let c = 0; c < COLS; c++) {
       const d = document.createElement("div");
       d.className = "cell" + (MAZE[r][c] === 1 ? " wall" : "");
       d.id = `cell-${r}-${c}`;
@@ -1500,12 +1507,12 @@ function drawTextBoard() {
     if (g) return g.name[0];                 // A / B / C / D
     return MAZE[r][c] === 1 ? "#" : ".";
   };
-  // Header line: two leading spaces (for the row-label column) then 0..9.
-  const cols = [...Array(SIZE).keys()].join(" ");
+  // Header line: two leading spaces (for the row-label column) then 0..COLS-1.
+  const cols = [...Array(COLS).keys()].map(n => n % 10).join(" ");
   let grid = "  " + cols + "\n";
-  for (let r = 0; r < SIZE; r++) {
+  for (let r = 0; r < ROWS; r++) {
     let line = r + " ";                       // 1-digit row label + space
-    for (let c = 0; c < SIZE; c++) line += sym(r, c) + (c < SIZE - 1 ? " " : "");
+    for (let c = 0; c < COLS; c++) line += sym(r, c) + (c < COLS - 1 ? " " : "");
     grid += line + "\n";
   }
   const legend = "# wall   . floor   P Pac-Man   A Atlanta   B Berkeley   C Chicago   D Delaware";
