@@ -354,6 +354,43 @@
     text-align: left;
   }
 
+  /* activity log popup (temporary debug tool) */
+  #logModal .card { width: 820px; max-width: 94vw; align-items: stretch; }
+  #logModal h2 { text-align: left; }
+  .logbody {
+    height: 60vh;
+    overflow: auto;
+    background: var(--floor);
+    border: 1px solid var(--edge);
+    border-radius: 8px;
+    padding: 10px 12px;
+    font-size: 12.5px;
+    line-height: 1.5;
+    text-align: left;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .logrow { display: flex; gap: 8px; align-items: baseline; }
+  .logtag {
+    flex: none;
+    font-size: 10px;
+    font-weight: bold;
+    letter-spacing: 0.5px;
+    padding: 1px 6px;
+    border-radius: 5px;
+    border: 1px solid var(--edge);
+    min-width: 52px;
+    text-align: center;
+  }
+  .logtag.api  { color: var(--chicago); border-color: #1c6a6a; background: rgba(54,224,224,0.08); }
+  .logtag.move { color: var(--accent);  border-color: #8a7a00; background: rgba(255,224,0,0.08); }
+  .logmeta { color: var(--muted); flex: none; }
+  .logactor { font-weight: bold; }
+  .logmsg { color: var(--ink); }
+  .logmsg.fallback { color: #ff9a9a; }
+  .logempty { color: var(--muted); font-style: italic; text-align: center; padding: 20px; }
+
   /* result */
   .verdict { font-size: 40px; font-weight: bold; letter-spacing: 3px; }
   .verdict.win { color: #4dff88; text-shadow: 0 0 18px rgba(77,255,136,.4); }
@@ -442,6 +479,7 @@
           <button id="playBtn2" class="primary" title="Play / Pause auto-advance">&#9654; Play</button>
           <button id="fwdBtn" title="Step forward one turn">&raquo;</button>
           <button id="textToggle" title="Switch board / text view">Text view</button>
+          <button id="logToggle" title="Open the activity log (debug)">Log</button>
         </div>
       </div>
 
@@ -506,6 +544,18 @@
       <pre id="mdModalBody" class="mdmodal-body"></pre>
       <div class="row">
         <button class="primary" id="mdModalClose">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ ACTIVITY LOG POPUP (temporary debug) ============ -->
+  <div id="logModal" class="overlay hidden">
+    <div class="card">
+      <h2>Activity log <span class="memsub">(debug — API calls + decisions)</span></h2>
+      <div id="logBody" class="logbody"></div>
+      <div class="row">
+        <button id="logClear">Clear log</button>
+        <button class="primary" id="logClose">Close</button>
       </div>
     </div>
   </div>
@@ -768,15 +818,17 @@ async function decideGhostGrok(i, key) {
     try {
       const reply = await callGrok(messages, key);
       const parsed = parseGhostReply(reply, g);
-      if (parsed) return { ...parsed, fallback: false };
+      if (parsed) { logApi(g.name, `success (try ${attempt + 1}/${TRIES})`, false); return { ...parsed, fallback: false }; }
       throw new Error("unparseable/illegal reply: " + oneLine(reply));
     } catch (e) {
       console.log(`[OmegaPacman] ${g.name} try ${attempt + 1}/${TRIES} failed: ${e.message}`);
+      logApi(g.name, `try ${attempt + 1}/${TRIES} failed: ${oneLine(e.message)}`, true);
       if (attempt < TRIES - 1) await sleep(500 * Math.pow(2, attempt) + Math.random() * 400);
     }
   }
   const mv = pickRandom(legal);
   console.log(`[OmegaPacman] ${g.name}: all ${TRIES} tries failed — random fallback ${dirOf(g.pos, mv)}`);
+  logApi(g.name, `fallback-to-random → ${dirOf(g.pos, mv)} (all ${TRIES} Grok tries failed)`, true);
   return { move: mv, dir: dirOf(g.pos, mv), reason: "(random fallback — Grok unavailable)", fallback: true };
 }
 
@@ -825,15 +877,17 @@ async function decidePacmanGrok(key) {
     try {
       const reply = await callGrok(messages, key);
       const parsed = parseGhostReply(reply, PACMAN);
-      if (parsed) return { ...parsed, fallback: false };
+      if (parsed) { logApi("Pac-Man", `success (try ${attempt + 1}/${TRIES})`, false); return { ...parsed, fallback: false }; }
       throw new Error("unparseable/illegal reply: " + oneLine(reply));
     } catch (e) {
       console.log(`[OmegaPacman] Pac-Man try ${attempt + 1}/${TRIES} failed: ${e.message}`);
+      logApi("Pac-Man", `try ${attempt + 1}/${TRIES} failed: ${oneLine(e.message)}`, true);
       if (attempt < TRIES - 1) await sleep(500 * Math.pow(2, attempt) + Math.random() * 400);
     }
   }
   const mv = pickRandom(legal);
   console.log(`[OmegaPacman] Pac-Man: all ${TRIES} tries failed — random fallback ${dirOf(PACMAN.pos, mv)}`);
+  logApi("Pac-Man", `fallback-to-random → ${dirOf(PACMAN.pos, mv)} (all ${TRIES} Grok tries failed)`, true);
   return { move: mv, dir: dirOf(PACMAN.pos, mv), reason: "(random fallback — Grok unavailable)", fallback: true };
 }
 
@@ -851,12 +905,14 @@ function setReadyLabel(actorIndex) {
   if (actorIndex === 0) setTurnLabel("Pac-Man — to move", "var(--pac)", false);
   else { const g = GHOSTS[actorIndex - 1]; setTurnLabel(`${g.name} — to move`, g.color, false); }
 }
-// Show the latest ghost decision (move + reason) in the big label.
+// Show the latest decision (move + reason) in the big label, and record it in
+// the permanent activity log (the label clears on the next move; the log keeps it).
 function showMoveInfo(g, dec) {
   setTurnLabel(
     `<span class="tl-actor">${g.name} → ${dec.dir}</span>` +
     `<span class="tl-reason">${dec.fallback ? " " : " · "}${escapeHtml(dec.reason)}</span>`,
     g.color, false);
+  logMove(g.name, dec.dir, dec.reason, dec.fallback);
 }
 function setThinking(g) {
   setTurnLabel(`${g.name} is deciding…`, g.color, true);
@@ -949,6 +1005,7 @@ async function doSubTurn() {
       dec = await decidePacmanGrok(game.apiKey);   // Grok decides Pac-Man's move
       if (game.status !== "playing") return;       // game was reset mid-call
     } else {
+      logApi("Pac-Man", "no API key — random move (no Grok call)", true);
       const opts = moveOptions(PACMAN.pos, false);
       const mv = opts.length ? pickRandom(opts) : { ...PACMAN.pos };
       dec = { move: mv, dir: dirOf(PACMAN.pos, mv), reason: "(no API key — random move)", fallback: true };
@@ -964,6 +1021,7 @@ async function doSubTurn() {
       dec = await decideGhostGrok(i, game.apiKey); // Grok decides
       if (game.status !== "playing") return;       // game was reset mid-call
     } else {
+      logApi(g.name, "no API key — random move (no Grok call)", true);
       const opts = moveOptions(g.pos, false);
       const mv = opts.length ? pickRandom(opts) : { ...g.pos };
       dec = { move: mv, dir: dirOf(g.pos, mv), reason: "(no API key — random move)", fallback: true };
@@ -1143,6 +1201,50 @@ document.getElementById("teamMd").addEventListener("click", () => openMdModal("T
 document.getElementById("mdModalClose").addEventListener("click", () =>
   document.getElementById("mdModal").classList.add("hidden"));
 
+// ---- activity log (temporary debug tool) --------------------------------
+// Two streams kept in one chronological list that never auto-clears:
+//   • API   — every Grok call's outcome (success / try-failed / fallback)
+//   • MOVE  — every actor's decision (dir + reason), incl. Pac-Man
+const gameLog = [];   // {kind:'api'|'move', actor, msg, fallback, round, turn}
+
+function actorColor(name) {
+  if (name === "Pac-Man") return "var(--pac)";
+  const g = GHOSTS.find(x => x.name === name);
+  return g ? g.color : "var(--ink)";
+}
+function logOpen() { return !document.getElementById("logModal").classList.contains("hidden"); }
+function pushLog(entry) {
+  gameLog.push(entry);
+  if (logOpen()) renderLog();          // live-update if the popup is showing
+}
+function logApi(actor, msg, fallback) {
+  pushLog({ kind: "api", actor, msg, fallback: !!fallback, round: game.round, turn: game.turn });
+}
+function logMove(actor, dir, reason, fallback) {
+  pushLog({ kind: "move", actor, msg: `→ ${dir} · ${reason}`, fallback: !!fallback, round: game.round, turn: game.turn });
+}
+function renderLog() {
+  const body = document.getElementById("logBody");
+  if (!gameLog.length) {
+    body.innerHTML = `<div class="logempty">No activity yet — press ▶ / » to start a turn.</div>`;
+    return;
+  }
+  body.innerHTML = gameLog.map(e => {
+    const tag = e.kind === "api"
+      ? `<span class="logtag api">API</span>`
+      : `<span class="logtag move">MOVE</span>`;
+    const meta  = `<span class="logmeta">R${e.round}·T${e.turn}</span>`;
+    const actor = `<span class="logactor" style="color:${actorColor(e.actor)}">${escapeHtml(e.actor)}</span>`;
+    const model = e.kind === "api" ? `<span class="logmeta">grok-4.3</span>` : ``;
+    const msg   = `<span class="logmsg${e.fallback ? " fallback" : ""}">${escapeHtml(e.msg)}</span>`;
+    return `<div class="logrow">${tag}${meta}${actor}${model}${msg}</div>`;
+  }).join("");
+  body.scrollTop = body.scrollHeight;   // newest at the bottom
+}
+document.getElementById("logToggle").addEventListener("click", () => { renderLog(); show("logModal", true); });
+document.getElementById("logClose").addEventListener("click", () => show("logModal", false));
+document.getElementById("logClear").addEventListener("click", () => { gameLog.length = 0; renderLog(); });
+
 // ---- settings menu + API key overlay ------------------------------------
 function syncKeyFields() {
   document.getElementById("apikeyInput").value = game.apiKey;
@@ -1173,7 +1275,7 @@ document.getElementById("settingsClose").addEventListener("click", () => {
 document.getElementById("settingsCancel").addEventListener("click", () => show("settingsOverlay", false));
 
 // Click the dark backdrop (outside the card) to dismiss any overlay.
-["settingsMenu", "settingsOverlay", "mdModal"].forEach(id => {
+["settingsMenu", "settingsOverlay", "mdModal", "logModal"].forEach(id => {
   const ov = document.getElementById(id);
   ov.addEventListener("click", e => { if (e.target === ov) show(id, false); });
 });
