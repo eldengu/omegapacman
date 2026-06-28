@@ -784,17 +784,23 @@ function dirOf(from, to) {
 
 // Build the single decision context for ALL four ghosts. Includes the shared
 // game state, each ghost's legal moves + its own .md, and the team .md.
+// Lists ONLY the open (legal) moves with their destinations (walls omitted), and
+// uses plain ASCII ("->") so the weak ghost model can't pick a wall and doesn't
+// have to reproduce fancy Unicode glyphs.
 function legalMovesText(pos) {
-  return ["up", "down", "left", "right"].map(dir => {
-    const [dr, dc] = DIRV[dir];
-    const r = pos.r + dr, c = pos.c + dc;
-    return isFloor(r, c) ? `${dir}→(${r},${c}) open` : `${dir}→wall`;
-  }).join(", ");
+  const open = ["up", "down", "left", "right"]
+    .map(dir => {
+      const [dr, dc] = DIRV[dir];
+      const r = pos.r + dr, c = pos.c + dc;
+      return isFloor(r, c) ? `${dir}->(${r},${c})` : null;
+    })
+    .filter(Boolean);
+  return open.length ? open.join(", ") : "(none - trapped)";
 }
 function buildGhostsContext() {
   const positions = GHOSTS.map(g => `${g.name} (${g.pos.r},${g.pos.c})`).join(", ");
   const perGhost = GHOSTS.map(g => [
-    `${g.name} at (${g.pos.r},${g.pos.c}) — legal moves: ${legalMovesText(g.pos)}`,
+    `${g.name} at (${g.pos.r},${g.pos.c}) - legal moves: ${legalMovesText(g.pos)}`,
     `--- ${g.name.toLowerCase()}.md ---`,
     (MEMORY[g.key] || "").trim(),
   ].join("\n")).join("\n\n");
@@ -815,21 +821,22 @@ function buildGhostsContext() {
     `--- team notes (team.md, shared by all ghosts) ---`,
     (MEMORY.team || "").trim(),
     ``,
-    `Choose exactly ONE legal move for EACH ghost (a move marked "open", not a wall), and give each its own brief reason.`,
+    `Choose exactly ONE move for EACH ghost from that ghost's listed legal moves, and give each its own brief reason.`,
     `Reply with EXACTLY these four lines and nothing else:`,
-    `ATLANTA: <up|down|left|right> · <reason>`,
-    `BERKELEY: <up|down|left|right> · <reason>`,
-    `CHICAGO: <up|down|left|right> · <reason>`,
-    `DELAWARE: <up|down|left|right> · <reason>`,
+    `ATLANTA: <up|down|left|right> | <reason>`,
+    `BERKELEY: <up|down|left|right> | <reason>`,
+    `CHICAGO: <up|down|left|right> | <reason>`,
+    `DELAWARE: <up|down|left|right> | <reason>`,
   ].join("\n");
 }
 
 // Parse the reply into {key: {dir, move, reason}} for each ghost. TOLERANT, because
 // the small/weak ghost model often replies messily: for each ghost we find the
-// FIRST direction word that appears just after that ghost's name (allowing ":",
-// "-", "·", words like "moves", numbering, etc. in between, same line, within a
-// short window), then take the rest of that line as the reason. Missing or illegal
-// ghosts are simply absent — the caller gives those a random-legal fallback.
+// FIRST direction word that appears just after that ghost's name (the expected
+// separator is the ASCII " | ", but ":", "-", words like "moves", numbering, etc.
+// are also tolerated), same line, within a short window; then take the rest of
+// that line as the reason. Missing or illegal ghosts are simply absent - the
+// caller gives those a random-legal fallback.
 function parseGhostsReply(reply) {
   const out = {};
   const text = reply || "";
