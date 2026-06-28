@@ -455,7 +455,7 @@
         <input id="apikeyInput" type="password" autocomplete="off" spellcheck="false"
                placeholder="AIza..." />
       </label>
-      <p class="hint">This key is for the GHOSTS only (Gemini, gemini-2.5-flash-lite, play + learning). Pac-Man runs on local Ollama (minimax-m3:cloud) and needs no key. Stored in memory only for this session.</p>
+      <p class="hint">Used for every model call via Gemini: Pac-Man play + learning (gemini-3.1-flash-lite) and the ghosts' play + learning (gemini-2.5-flash-lite). Stored in memory only for this session.</p>
       <div class="row">
         <button data-go="start">Back</button>
         <button class="primary" id="apikeyNext">Next</button>
@@ -590,7 +590,7 @@
       <label class="field">Google AI Studio API key
         <input id="settingsKey" type="password" autocomplete="off" spellcheck="false" placeholder="AIza..." />
       </label>
-      <p class="hint">Ghosts only (Gemini, gemini-2.5-flash-lite). Pac-Man runs on local Ollama (minimax-m3:cloud), no key. Kept in memory only.</p>
+      <p class="hint">Used for all Gemini calls: Pac-Man play + learning (gemini-3.1-flash-lite), ghosts play + learning (gemini-2.5-flash-lite). Kept in memory only.</p>
       <div class="row">
         <button id="settingsCancel">Cancel</button>
         <button class="primary" id="settingsClose">Save</button>
@@ -600,15 +600,13 @@
 
 <script>
 /* ===================================================================
-   OmegaPacman — split-backend co-evolution variant. The two agents run on
-   DIFFERENT OpenAI-compatible backends (see callModel/backendFor):
-     • Pac-Man → local Ollama Cloud (PACMAN_MODEL), keyless. Reads its own
-       pacman.md each turn and learns solo between rounds.
-     • Ghosts  → Google Gemini (GHOST_MODEL), Bearer key. ONE call decides all
-       four at once (reading per-ghost + team notes) and they learn collectively.
-   After each game BOTH sides reflect (Reflexion) and rewrite their notes, so
-   collective vs solo learning co-evolve. Sub-turn controls, scoring, metrics,
-   and rounds are unchanged.
+   OmegaPacman — Gemini co-evolution variant. Both agents run on Google's Gemini
+   OpenAI-compatible endpoint (Bearer key). Each turn Pac-Man asks PACMAN_MODEL to
+   pick a move (reading its own pacman.md); then ONE call to GHOST_MODEL decides
+   all four ghosts at once (reading their per-ghost + team notes). After each game
+   BOTH sides learn (Reflexion): the ghosts collectively rewrite their 5 notes and
+   Pac-Man solo rewrites pacman.md — so collective vs solo learning co-evolve.
+   Sub-turn controls, scoring, metrics, and rounds are unchanged.
    =================================================================== */
 
 // ---- world data ---------------------------------------------------------
@@ -624,9 +622,9 @@ const START = {
   pacman: { r: 5, c: 4 },
   ghosts: [ { r: 1, c: 1 }, { r: 1, c: 8 }, { r: 8, c: 1 }, { r: 8, c: 8 } ],
 };
-// Pac-Man is LLM-driven on its own backend (Ollama): each turn its model picks a
-// move to survive while collecting pellets (see decidePacman). Pac-Man reads its
-// own single pacman.md and learns solo between rounds (see learnPacman).
+// Pac-Man is Gemini-driven too: each turn its model picks a move to survive while
+// collecting pellets (see decidePacman). Pac-Man reads its own single pacman.md
+// and learns solo between rounds (see learnPacman).
 
 // 10x10 maze (1=wall, 0=floor).
 const MAZE = [
@@ -644,27 +642,17 @@ const MAZE = [
 const SIZE = 10;
 const MAZE_TEXT = MAZE.map(row => row.map(v => (v ? "#" : ".")).join("")).join("\n");
 
-// ---- Model backends (both OpenAI-compatible) ----------------------------
-// The two agents run on DIFFERENT backends. Each agent uses its OWN model for
-// BOTH play and learning (co-evolution): Pac-Man learns solo; the ghosts learn
-// collectively (shared + per-ghost notes).
-//   • Pac-Man → local Ollama Cloud at localhost:11434, NO API key / NO Bearer.
-//   • Ghosts  → Google Gemini, WITH the AI Studio Bearer key.
-// The Gemini key is read from the ⚙️ key input (game.apiKey) or a
+// ---- Gemini (Google AI Studio, OpenAI-compatible) config ----------------
+// Both agents run on Gemini's OpenAI-compatible endpoint with the AI Studio
+// Bearer key. Each agent uses its OWN model for BOTH play and learning
+// (co-evolution): Pac-Man learns solo; the ghosts learn collectively.
+// The key is read from the ⚙️ key input (game.apiKey) or a
 // globalThis.GEMINI_API_KEY env-like override — it is never hardcoded.
 const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";
-const OLLAMA_URL = "http://localhost:11434/v1/chat/completions";
-const PACMAN_MODEL = "minimax-m3:cloud";        // Pac-Man play + solo learning (Ollama, keyless)
-const GHOST_MODEL  = "gemini-2.5-flash-lite";   // 4-ghost play + collective learning (Gemini)
+const PACMAN_MODEL = "gemini-3.1-flash-lite";   // Pac-Man play + solo learning (fast dev model; -> gemini-2.5-pro for the final demo)
+const GHOST_MODEL  = "gemini-2.5-flash-lite";   // 4-ghost play + collective learning
 function apiKey() {
   return (game.apiKey || (typeof globalThis !== "undefined" && globalThis.GEMINI_API_KEY) || "").trim();
-}
-// Backend-aware routing: choose endpoint + auth by which agent's model is calling.
-// Pac-Man's model → Ollama (no Bearer); anything else → Gemini (Bearer key).
-function backendFor(model) {
-  return model === PACMAN_MODEL
-    ? { name: "Ollama", url: OLLAMA_URL, auth: false }
-    : { name: "Gemini", url: GEMINI_URL, auth: true };
 }
 
 const DIRV = { up: [-1, 0], down: [1, 0], left: [0, -1], right: [0, 1] };
@@ -880,30 +868,25 @@ function parseGhostReply(reply, g) {
   return { dir, move, reason: rm ? oneLine(rm[1]) : oneLine(reply) };
 }
 
-// Backend-aware caller. Both backends are OpenAI-compatible, so the request body
-// (model + messages) and the response shape (choices[0].message.content) are
-// identical and all parsing downstream is unchanged — only the endpoint and auth
-// differ: Ollama (Pac-Man) sends NO Bearer header; Gemini (ghosts) sends one.
+// Gemini via its OpenAI-compatible endpoint, for BOTH agents. Auth is a Bearer
+// API key. The request/response shapes are the standard OpenAI ones
+// (choices[0].message.content), so all parsing downstream is unchanged. A network
+// failure surfaces a clear, actionable message.
 async function callModel(messages, model) {
-  const be = backendFor(model);
-  const headers = { "Content-Type": "application/json" };
-  if (be.auth) headers["Authorization"] = "Bearer " + apiKey();
   let res;
   try {
-    res = await fetch(be.url, {
+    res = await fetch(GEMINI_URL, {
       method: "POST",
-      headers,
+      headers: { "Content-Type": "application/json", "Authorization": "Bearer " + apiKey() },
       body: JSON.stringify({ model, messages }),
     });
   } catch (e) {
-    throw new Error(be.name === "Ollama"
-      ? "Can't reach Ollama at localhost:11434 — is it running with OLLAMA_ORIGINS=* ?"
-      : "Can't reach Gemini API at generativelanguage.googleapis.com — check your network and API key.");
+    throw new Error("Can't reach Gemini API at generativelanguage.googleapis.com — check your network and API key.");
   }
-  if (!res.ok) { const e = new Error(be.name + " HTTP " + res.status); e.status = res.status; throw e; }
+  if (!res.ok) { const e = new Error("Gemini HTTP " + res.status); e.status = res.status; throw e; }
   const data = await res.json();
   const text = data?.choices?.[0]?.message?.content;
-  if (!text) throw new Error(be.name + ": empty response");
+  if (!text) throw new Error("Gemini: empty response");
   return text;
 }
 
@@ -981,8 +964,8 @@ function buildPacmanContext() {
   ].join("\n");
 }
 
-// Decide Pac-Man's move via its Ollama backend: same robust retry + random-legal
-// fallback as the ghosts. parseGhostReply works for any entity with a .pos.
+// Decide Pac-Man's move via Gemini: same robust retry + random-legal fallback as
+// the ghosts. parseGhostReply works for any entity with a .pos (PACMAN has one).
 async function decidePacman() {
   const legal = moveOptions(PACMAN.pos, false);
   if (!legal.length) return { move: { ...PACMAN.pos }, dir: "stay", reason: "no legal move", fallback: false };
@@ -1006,8 +989,8 @@ async function decidePacman() {
   }
   const mv = pickRandom(legal);
   console.log(`[OmegaPacman] Pac-Man: all ${TRIES} tries failed — random fallback ${dirOf(PACMAN.pos, mv)}`);
-  logApi("Pac-Man", `fallback-to-random → ${dirOf(PACMAN.pos, mv)} (all ${TRIES} Ollama tries failed)`, true, PACMAN_MODEL);
-  return { move: mv, dir: dirOf(PACMAN.pos, mv), reason: "(random fallback — Ollama unavailable)", fallback: true };
+  logApi("Pac-Man", `fallback-to-random → ${dirOf(PACMAN.pos, mv)} (all ${TRIES} Gemini tries failed)`, true, PACMAN_MODEL);
+  return { move: mv, dir: dirOf(PACMAN.pos, mv), reason: "(random fallback — Gemini unavailable)", fallback: true };
 }
 
 // The big top label carries the LIVE status of the actor in play: who is
@@ -1216,7 +1199,7 @@ async function learnPacman(win) {
       if (attempt < TRIES - 1) await sleep(500 * Math.pow(2, attempt) + Math.random() * 400);
     }
   }
-  logApi("Learning", `Pac-Man notes unchanged (all ${TRIES} Ollama tries failed)`, true, PACMAN_MODEL);
+  logApi("Learning", `Pac-Man notes unchanged (all ${TRIES} Gemini tries failed)`, true, PACMAN_MODEL);
 }
 
 // ---- per-round metrics --------------------------------------------------
@@ -1320,11 +1303,17 @@ async function doSubTurn() {
 
   const PAC = { name: "Pac-Man", color: "var(--pac)" };   // for the status label
   if (i === 0) {
-    // Pac-Man runs on Ollama (no API key needed) — always attempt it; the
-    // function has its own random-legal fallback if Ollama is unreachable.
-    setThinking(PAC);
-    const dec = await decidePacman();              // Ollama decides Pac-Man's move
-    if (game.status !== "playing") return;         // game was reset mid-call
+    let dec;
+    if (apiKey()) {
+      setThinking(PAC);
+      dec = await decidePacman();                  // Gemini decides Pac-Man's move
+      if (game.status !== "playing") return;       // game was reset mid-call
+    } else {
+      logApi("Pac-Man", "no API key — random move (no Gemini call)", true, PACMAN_MODEL);
+      const opts = moveOptions(PACMAN.pos, false);
+      const mv = opts.length ? pickRandom(opts) : { ...PACMAN.pos };
+      dec = { move: mv, dir: dirOf(PACMAN.pos, mv), reason: "(no API key — random move)", fallback: true };
+    }
     PACMAN.pos = dec.move;
     game.pellets.delete(keyOf(PACMAN.pos.r, PACMAN.pos.c));   // eat pellet on landing
     showMoveInfo(PAC, dec);                         // "Pac-Man → left · …"
@@ -1448,13 +1437,13 @@ async function endGame(win) {
   renderMetrics();
 
   // LEARNING (co-evolution): both sides reflect on this game and rewrite their
-  // notes before the next round, in parallel. Pac-Man learns solo on Ollama (no
-  // key needed); the ghosts learn collectively on Gemini (only if the key is set).
-  // Updated notes are visible in the Memory panel when the modal opens.
-  setTurnLabel("Pac-Man & ghosts are learning…", "var(--accent)", true);
-  const learnTasks = [learnPacman(win)];              // Pac-Man → Ollama, keyless
-  if (apiKey()) learnTasks.push(learnFromGame(win));  // ghosts → Gemini, needs key
-  await Promise.all(learnTasks);
+  // notes before the next round — Pac-Man solo and the ghosts collectively, in
+  // parallel (both on Gemini, so gated on the key). The updated notes are visible
+  // in the Memory panel when the modal opens.
+  if (apiKey()) {
+    setTurnLabel("Pac-Man & ghosts are learning…", "var(--accent)", true);
+    await Promise.all([learnFromGame(win), learnPacman(win)]);
+  }
   show("resultModal", true);                        // modal over the board (no page switch)
   scheduleAutoProceed();                            // if Auto is on, advance to the next round
 }
