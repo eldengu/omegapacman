@@ -1,4 +1,8 @@
 node_modules
-.env
-__pycache__
 *.log
+
+# Python / local server (keep the API-keyed server out of git)
+vertex_server.py
+__pycache__/
+*.pyc
+.env
