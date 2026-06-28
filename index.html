@@ -455,7 +455,7 @@
         <input id="apikeyInput" type="password" autocomplete="off" spellcheck="false"
                placeholder="xai-..." />
       </label>
-      <p class="hint">Used for Pac-Man and the learning step (grok-4.3). The ghosts run on a local Ollama model (gemma4:e2b) — no key needed. Stored in memory only for this session.</p>
+      <p class="hint">Used for Pac-Man and the learning step (grok-4.3). The ghosts run on a local Ollama model (gemma3:4b-cloud) — no key needed. Stored in memory only for this session.</p>
       <div class="row">
         <button data-go="start">Back</button>
         <button class="primary" id="apikeyNext">Next</button>
@@ -590,7 +590,7 @@
       <label class="field">Grok / xAI API key
         <input id="settingsKey" type="password" autocomplete="off" spellcheck="false" placeholder="xai-..." />
       </label>
-      <p class="hint">Used for Pac-Man + learning (grok-4.3). Ghosts use local Ollama (gemma4:e2b), no key needed. Kept in memory only.</p>
+      <p class="hint">Used for Pac-Man + learning (grok-4.3). Ghosts use local Ollama (gemma3:4b-cloud), no key needed. Kept in memory only.</p>
       <div class="row">
         <button id="settingsCancel">Cancel</button>
         <button class="primary" id="settingsClose">Save</button>
@@ -600,11 +600,11 @@
 
 <script>
 /* ===================================================================
-   OmegaPacman — E2B variant (asymmetric: strong Pac-Man vs weak ghosts).
+   OmegaPacman — 4b-cloud variant (asymmetric: strong Pac-Man vs weak ghosts).
    Each turn Pac-Man asks Grok (grok-4.3) to pick a move to survive while eating
-   pellets; then ONE call to a LOCAL Ollama model (gemma4:e2b) decides all four
-   ghosts at once. After each game the learning step (Reflexion) runs on Grok and
-   rewrites the ghosts' .md. Pac-Man has NO memory; only the ghosts learn.
+   pellets; then ONE call to a local Ollama model (gemma3:4b-cloud) decides all
+   four ghosts at once. After each game the learning step (Reflexion) runs on Grok
+   and rewrites the ghosts' .md. Pac-Man has NO memory; only the ghosts learn.
    Sub-turn controls, scoring, metrics, and rounds are unchanged.
    =================================================================== */
 
@@ -648,10 +648,12 @@ const GROK_URL = "https://api.x.ai/v1/chat/completions";
 const GROK_MODEL = "grok-4.3";
 
 // ---- Ollama (local, OpenAI-compatible) config — GHOSTS only -------------
-// Ollama must be running locally with OLLAMA_ORIGINS set (e.g. OLLAMA_ORIGINS=*)
-// so the browser can reach it. No API key is needed.
+// Served via the local Ollama at localhost:11434 with OLLAMA_ORIGINS set (e.g.
+// OLLAMA_ORIGINS=*) so the browser can reach it. No API key is needed. The model
+// is an Ollama Cloud model (fast GPU-backed weak Gemma), reached through the same
+// local endpoint after `ollama signin`.
 const OLLAMA_URL = "http://localhost:11434/v1/chat/completions";
-const OLLAMA_MODEL = "gemma4:e2b";
+const OLLAMA_MODEL = "gemma3:4b-cloud";
 
 const DIRV = { up: [-1, 0], down: [1, 0], left: [0, -1], right: [0, 1] };
 
@@ -823,7 +825,7 @@ function buildGhostsContext() {
 }
 
 // Parse the reply into {key: {dir, move, reason}} for each ghost. TOLERANT, because
-// the small E2B ghost model often replies messily: for each ghost we find the
+// the small/weak ghost model often replies messily: for each ghost we find the
 // FIRST direction word that appears just after that ghost's name (allowing ":",
 // "-", "·", words like "moves", numbering, etc. in between, same line, within a
 // short window), then take the rest of that line as the reason. Missing or illegal
@@ -892,7 +894,7 @@ async function callOllama(messages) {
   return text;
 }
 
-// Decide ALL four ghosts in ONE local Ollama (E2B) call: ~5 tries with
+// Decide ALL four ghosts in ONE local Ollama call: ~5 tries with
 // backoff+jitter. Returns an array of {g, move, dir, reason, fallback} — one per
 // ghost, in GHOSTS order. Any ghost missing/illegal in the (often messy) reply
 // gets a random-legal move (logged). Pac-Man + learning stay on Grok.
@@ -1254,7 +1256,7 @@ async function doSubTurn() {
     showMoveInfo(PAC, dec);                         // "Pac-Man → left · …"
     recordTurn("Pac-Man", dec.dir, dec.reason);
   } else {
-    // Ghosts run on local Ollama (E2B) — no API key needed, always attempt it.
+    // Ghosts run on the local Ollama model — no API key needed, always attempt it.
     setTurnLabel("Ghosts are deciding…", "var(--accent)", true);
     const decs = await decideGhostsOllama();        // ONE call decides all four
     if (game.status !== "playing") return;          // game was reset mid-call
@@ -1492,7 +1494,7 @@ document.getElementById("mdModalClose").addEventListener("click", () =>
 // ---- activity log (temporary debug tool) --------------------------------
 // Two streams kept in one chronological list that never auto-clears:
 //   • API   — every LLM call's outcome (success / try-failed / fallback), with
-//             the model used: ghosts = local E2B, Pac-Man + Learning = Grok
+//             the model used: ghosts = local Ollama, Pac-Man + Learning = Grok
 //   • MOVE  — every actor's decision (dir + reason), incl. Pac-Man
 const gameLog = [];   // {kind:'api'|'move', actor, msg, fallback, model?, round, turn}
 
@@ -1506,8 +1508,8 @@ function pushLog(entry) {
   gameLog.push(entry);
   if (logOpen()) renderLog();          // live-update if the popup is showing
 }
-// API rows record which model served the call: ghosts use the local E2B model,
-// Pac-Man + Learning use Grok (default).
+// API rows record which model served the call: ghosts use the local Ollama
+// model, Pac-Man + Learning use Grok (default).
 function logApi(actor, msg, fallback, model) {
   pushLog({ kind: "api", actor, msg, fallback: !!fallback, model: model || GROK_MODEL, round: game.round, turn: game.turn });
 }
