@@ -455,7 +455,7 @@
         <input id="apikeyInput" type="password" autocomplete="off" spellcheck="false"
                placeholder="xai-..." />
       </label>
-      <p class="hint">Stored in memory only for this session — no calls are made yet (UI mockup).</p>
+      <p class="hint">Used for Pac-Man and the learning step (grok-4.3). The ghosts run on a local Ollama model (gemma4:e2b) — no key needed. Stored in memory only for this session.</p>
       <div class="row">
         <button data-go="start">Back</button>
         <button class="primary" id="apikeyNext">Next</button>
@@ -590,7 +590,7 @@
       <label class="field">Grok / xAI API key
         <input id="settingsKey" type="password" autocomplete="off" spellcheck="false" placeholder="xai-..." />
       </label>
-      <p class="hint">Mockup — the key is kept in memory only and not used for any calls yet.</p>
+      <p class="hint">Used for Pac-Man + learning (grok-4.3). Ghosts use local Ollama (gemma4:e2b), no key needed. Kept in memory only.</p>
       <div class="row">
         <button id="settingsCancel">Cancel</button>
         <button class="primary" id="settingsClose">Save</button>
@@ -600,11 +600,12 @@
 
 <script>
 /* ===================================================================
-   OmegaPacman — STEP 2-3: every actor is Grok-driven. Each turn Pac-Man asks
-   Grok to pick a move to survive the ghosts while eating pellets, then the four
-   ghosts each ask Grok to pick a move to catch Pac-Man. Sequential resolution,
-   sub-turn controls, scoring, and rounds unchanged. Pac-Man has NO memory; the
-   ghosts carry .md notes but do not learn yet (learning is the next step).
+   OmegaPacman — E2B variant (asymmetric: strong Pac-Man vs weak ghosts).
+   Each turn Pac-Man asks Grok (grok-4.3) to pick a move to survive while eating
+   pellets; then ONE call to a LOCAL Ollama model (gemma4:e2b) decides all four
+   ghosts at once. After each game the learning step (Reflexion) runs on Grok and
+   rewrites the ghosts' .md. Pac-Man has NO memory; only the ghosts learn.
+   Sub-turn controls, scoring, metrics, and rounds are unchanged.
    =================================================================== */
 
 // ---- world data ---------------------------------------------------------
@@ -641,8 +642,17 @@ const SIZE = 10;
 const MAZE_TEXT = MAZE.map(row => row.map(v => (v ? "#" : ".")).join("")).join("\n");
 
 // ---- Grok (xAI) config --------------------------------------------------
+// ASYMMETRIC setup: Pac-Man + the learning step use Grok (strong); the ghosts'
+// combined move call uses a local Ollama model (weak) — see OLLAMA_* below.
 const GROK_URL = "https://api.x.ai/v1/chat/completions";
 const GROK_MODEL = "grok-4.3";
+
+// ---- Ollama (local, OpenAI-compatible) config — GHOSTS only -------------
+// Ollama must be running locally with OLLAMA_ORIGINS set (e.g. OLLAMA_ORIGINS=*)
+// so the browser can reach it. No API key is needed.
+const OLLAMA_URL = "http://localhost:11434/v1/chat/completions";
+const OLLAMA_MODEL = "gemma4:e2b";
+
 const DIRV = { up: [-1, 0], down: [1, 0], left: [0, -1], right: [0, 1] };
 
 // SKILL.md memory — READ-ONLY during play. Starts nearly empty: no strategy,
@@ -812,19 +822,24 @@ function buildGhostsContext() {
   ].join("\n");
 }
 
-// Parse the four-line reply into {key: {dir, move, reason}} for each ghost whose
-// line is present AND legal. Missing/illegal ghosts are simply absent (the caller
-// gives those a random-legal fallback).
+// Parse the reply into {key: {dir, move, reason}} for each ghost. TOLERANT, because
+// the small E2B ghost model often replies messily: for each ghost we find the
+// FIRST direction word that appears just after that ghost's name (allowing ":",
+// "-", "·", words like "moves", numbering, etc. in between, same line, within a
+// short window), then take the rest of that line as the reason. Missing or illegal
+// ghosts are simply absent — the caller gives those a random-legal fallback.
 function parseGhostsReply(reply) {
   const out = {};
+  const text = reply || "";
   for (const g of GHOSTS) {
-    const re = new RegExp(`${g.name}\\s*[:\\-]\\s*(up|down|left|right)\\b[ \\t]*[·:\\-|–—]?[ \\t]*([^\\n]*)`, "i");
-    const m = (reply || "").match(re);
+    const re = new RegExp(
+      `${g.name}\\b[^\\n]{0,40}?\\b(up|down|left|right)\\b[ \\t]*[·:|\\-–—.,>]*[ \\t]*([^\\n]*)`, "i");
+    const m = text.match(re);
     if (!m) continue;
     const dir = m[1].toLowerCase();
     const [dr, dc] = DIRV[dir];
     const move = { r: g.pos.r + dr, c: g.pos.c + dc };
-    if (!isFloor(move.r, move.c)) continue;                  // illegal -> skip
+    if (!isFloor(move.r, move.c)) continue;                  // illegal -> skip (random fallback)
     out[g.key] = { dir, move, reason: oneLine(m[2]) || "(no reason given)" };
   }
   return out;
@@ -856,10 +871,32 @@ async function callGrok(messages, key) {
   return text;
 }
 
-// Decide ALL four ghosts in ONE Grok call: ~5 tries with backoff+jitter. Returns
-// an array of {g, move, dir, reason, fallback} — one per ghost, in GHOSTS order.
-// Any ghost missing/illegal in the reply gets a random-legal move (logged).
-async function decideGhostsGrok(key) {
+// Local Ollama (OpenAI-compatible). No API key — omit Authorization. A network
+// failure here almost always means Ollama isn't running / reachable from the
+// browser, so we surface a clear, actionable message.
+async function callOllama(messages) {
+  let res;
+  try {
+    res = await fetch(OLLAMA_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: OLLAMA_MODEL, messages, stream: false }),
+    });
+  } catch (e) {
+    throw new Error("Can't reach Ollama at localhost:11434 — is it running with OLLAMA_ORIGINS=* ?");
+  }
+  if (!res.ok) { const e = new Error("Ollama HTTP " + res.status); e.status = res.status; throw e; }
+  const data = await res.json();
+  const text = data?.choices?.[0]?.message?.content;
+  if (!text) throw new Error("Ollama: empty response");
+  return text;
+}
+
+// Decide ALL four ghosts in ONE local Ollama (E2B) call: ~5 tries with
+// backoff+jitter. Returns an array of {g, move, dir, reason, fallback} — one per
+// ghost, in GHOSTS order. Any ghost missing/illegal in the (often messy) reply
+// gets a random-legal move (logged). Pac-Man + learning stay on Grok.
+async function decideGhostsOllama() {
   const messages = [
     { role: "system", content: "You control all four cooperating ghosts at once to catch Pac-Man in a maze; they move simultaneously. Think briefly, then answer in the exact requested format." },
     { role: "user", content: buildGhostsContext() },
@@ -868,29 +905,29 @@ async function decideGhostsGrok(key) {
   let parsed = {}, success = false;
   for (let attempt = 0; attempt < TRIES; attempt++) {
     try {
-      const reply = await callGrok(messages, key);
+      const reply = await callOllama(messages);
       parsed = parseGhostsReply(reply);
       if (!Object.keys(parsed).length) throw new Error("no ghost moves parsed: " + oneLine(reply));
-      logApi("Ghosts", `success (try ${attempt + 1}/${TRIES}) — ${Object.keys(parsed).length}/4 parsed`, false);
+      logApi("Ghosts", `success (try ${attempt + 1}/${TRIES}) — ${Object.keys(parsed).length}/4 parsed`, false, OLLAMA_MODEL);
       success = true;
       break;
     } catch (e) {
       console.log(`[OmegaPacman] Ghosts try ${attempt + 1}/${TRIES} failed: ${e.message}`);
-      logApi("Ghosts", `try ${attempt + 1}/${TRIES} failed: ${oneLine(e.message)}`, true);
+      logApi("Ghosts", `try ${attempt + 1}/${TRIES} failed: ${oneLine(e.message)}`, true, OLLAMA_MODEL);
       if (attempt < TRIES - 1) await sleep(500 * Math.pow(2, attempt) + Math.random() * 400);
     }
   }
-  if (!success) logApi("Ghosts", `fallback — all ${TRIES} Grok tries failed; each ghost moves randomly`, true);
+  if (!success) logApi("Ghosts", `fallback — all ${TRIES} Ollama tries failed; each ghost moves randomly`, true, OLLAMA_MODEL);
 
   return GHOSTS.map(g => {
     const p = parsed[g.key];
     if (p) return { g, move: p.move, dir: p.dir, reason: p.reason, fallback: false };
     const legal = moveOptions(g.pos, false);
     const mv = legal.length ? pickRandom(legal) : { ...g.pos };
-    if (success) logApi(g.name, `missing/illegal in ghost reply — random fallback → ${dirOf(g.pos, mv)}`, true);
+    if (success) logApi(g.name, `missing/illegal in ghost reply — random fallback → ${dirOf(g.pos, mv)}`, true, OLLAMA_MODEL);
     return {
       g, move: mv, dir: dirOf(g.pos, mv),
-      reason: success ? "(random fallback — missing/illegal move)" : "(random fallback — Grok unavailable)",
+      reason: success ? "(random fallback — missing/illegal move)" : "(random fallback — Ollama unavailable)",
       fallback: true,
     };
   });
@@ -1217,19 +1254,10 @@ async function doSubTurn() {
     showMoveInfo(PAC, dec);                         // "Pac-Man → left · …"
     recordTurn("Pac-Man", dec.dir, dec.reason);
   } else {
-    let decs;
-    if (game.apiKey) {
-      setTurnLabel("Ghosts are deciding…", "var(--accent)", true);
-      decs = await decideGhostsGrok(game.apiKey);  // ONE call decides all four
-      if (game.status !== "playing") return;       // game was reset mid-call
-    } else {
-      logApi("Ghosts", "no API key — random moves (no Grok call)", true);
-      decs = GHOSTS.map(g => {
-        const opts = moveOptions(g.pos, false);
-        const mv = opts.length ? pickRandom(opts) : { ...g.pos };
-        return { g, move: mv, dir: dirOf(g.pos, mv), reason: "(no API key — random move)", fallback: true };
-      });
-    }
+    // Ghosts run on local Ollama (E2B) — no API key needed, always attempt it.
+    setTurnLabel("Ghosts are deciding…", "var(--accent)", true);
+    const decs = await decideGhostsOllama();        // ONE call decides all four
+    if (game.status !== "playing") return;          // game was reset mid-call
     decs.forEach(d => {                              // apply all four together
       d.g.pos = d.move;
       game.score = Math.max(0, game.score - 1);      // each ghost move costs -1
@@ -1463,9 +1491,10 @@ document.getElementById("mdModalClose").addEventListener("click", () =>
 
 // ---- activity log (temporary debug tool) --------------------------------
 // Two streams kept in one chronological list that never auto-clears:
-//   • API   — every Grok call's outcome (success / try-failed / fallback)
+//   • API   — every LLM call's outcome (success / try-failed / fallback), with
+//             the model used: ghosts = local E2B, Pac-Man + Learning = Grok
 //   • MOVE  — every actor's decision (dir + reason), incl. Pac-Man
-const gameLog = [];   // {kind:'api'|'move', actor, msg, fallback, round, turn}
+const gameLog = [];   // {kind:'api'|'move', actor, msg, fallback, model?, round, turn}
 
 function actorColor(name) {
   if (name === "Pac-Man") return "var(--pac)";
@@ -1477,8 +1506,10 @@ function pushLog(entry) {
   gameLog.push(entry);
   if (logOpen()) renderLog();          // live-update if the popup is showing
 }
-function logApi(actor, msg, fallback) {
-  pushLog({ kind: "api", actor, msg, fallback: !!fallback, round: game.round, turn: game.turn });
+// API rows record which model served the call: ghosts use the local E2B model,
+// Pac-Man + Learning use Grok (default).
+function logApi(actor, msg, fallback, model) {
+  pushLog({ kind: "api", actor, msg, fallback: !!fallback, model: model || GROK_MODEL, round: game.round, turn: game.turn });
 }
 function logMove(actor, dir, reason, fallback) {
   pushLog({ kind: "move", actor, msg: `→ ${dir} · ${reason}`, fallback: !!fallback, round: game.round, turn: game.turn });
@@ -1495,7 +1526,7 @@ function renderLog() {
       : `<span class="logtag move">MOVE</span>`;
     const meta  = `<span class="logmeta">R${e.round}·T${e.turn}</span>`;
     const actor = `<span class="logactor" style="color:${actorColor(e.actor)}">${escapeHtml(e.actor)}</span>`;
-    const model = e.kind === "api" ? `<span class="logmeta">grok-4.3</span>` : ``;
+    const model = e.kind === "api" ? `<span class="logmeta">${escapeHtml(e.model || GROK_MODEL)}</span>` : ``;
     const msg   = `<span class="logmsg${e.fallback ? " fallback" : ""}">${escapeHtml(e.msg)}</span>`;
     return `<div class="logrow">${tag}${meta}${actor}${model}${msg}</div>`;
   }).join("");
