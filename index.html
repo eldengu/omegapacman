@@ -1014,7 +1014,7 @@ function showMoveInfo(g, dec) {
     `<span class="tl-actor">${g.name} → ${dec.dir}</span>` +
     `<span class="tl-reason">${dec.fallback ? " " : " · "}${escapeHtml(dec.reason)}</span>`,
     g.color, false);
-  logMove(g.name, dec.dir, dec.reason, dec.fallback);
+  logMove(g.name, dec.from, dec.move, dec.dir, dec.reason, dec.fallback);
 }
 function setThinking(g) {
   setTurnLabel(`${g.name} is deciding…`, g.color, true);
@@ -1026,7 +1026,7 @@ function showGhostsInfo(decs) {
     `<span class="tl-actor" style="color:${d.g.color};font-size:22px">${d.g.name} → ${d.dir}</span>`
   ).join(`<span class="tl-reason"> · </span>`);
   setTurnLabel(html, "var(--ink)", false);
-  decs.forEach(d => logMove(d.g.name, d.dir, d.reason, d.fallback));
+  decs.forEach(d => logMove(d.g.name, d.from, d.move, d.dir, d.reason, d.fallback));
 }
 function escapeHtml(s) {
   return (s || "").replace(/[&<>]/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[ch]));
@@ -1314,9 +1314,10 @@ async function doSubTurn() {
       const mv = opts.length ? pickRandom(opts) : { ...PACMAN.pos };
       dec = { move: mv, dir: dirOf(PACMAN.pos, mv), reason: "(no API key — random move)", fallback: true };
     }
+    dec.from = { ...PACMAN.pos };                   // capture from-cell before applying
     PACMAN.pos = dec.move;
     game.pellets.delete(keyOf(PACMAN.pos.r, PACMAN.pos.c));   // eat pellet on landing
-    showMoveInfo(PAC, dec);                         // "Pac-Man → left · …"
+    showMoveInfo(PAC, dec);                         // "Pac-Man → left · …" + log with coords
     recordTurn("Pac-Man", dec.dir, dec.reason);
   } else {
     // Ghosts decided by ONE Gemini call (needs the API key, like Pac-Man).
@@ -1334,10 +1335,11 @@ async function doSubTurn() {
       });
     }
     decs.forEach(d => {                              // apply all four together
+      d.from = { ...d.g.pos };                       // capture from-cell before applying
       d.g.pos = d.move;
       game.score = Math.max(0, game.score - 1);      // each ghost move costs -1
     });
-    showGhostsInfo(decs);                            // label + one MOVE row per ghost
+    showGhostsInfo(decs);                            // label + one MOVE row per ghost (with coords)
     decs.forEach(d => recordTurn(d.g.name, d.dir, d.reason));
   }
 
@@ -1582,8 +1584,11 @@ function pushLog(entry) {
 function logApi(actor, msg, fallback, model) {
   pushLog({ kind: "api", actor, msg, fallback: !!fallback, model: model || "", round: game.round, turn: game.turn });
 }
-function logMove(actor, dir, reason, fallback) {
-  pushLog({ kind: "move", actor, msg: `→ ${dir} · ${reason}`, fallback: !!fallback, round: game.round, turn: game.turn });
+// from/to are {r,c} cells; the MOVE line surfaces them in (row,col) format so the
+// log carries each actor's movement, e.g. "(5,3)→(6,3) down · <reason>".
+function logMove(actor, from, to, dir, reason, fallback) {
+  const coords = `(${from.r},${from.c})→(${to.r},${to.c})`;
+  pushLog({ kind: "move", actor, msg: `${coords} ${dir} · ${reason}`, fallback: !!fallback, round: game.round, turn: game.turn });
 }
 function renderLog() {
   const body = document.getElementById("logBody");
