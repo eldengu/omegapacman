@@ -600,13 +600,13 @@
 
 <script>
 /* ===================================================================
-   OmegaPacman — Gemini unified variant. Every model call goes through Google's
-   Gemini OpenAI-compatible endpoint. Each turn Pac-Man asks gemini-3.5-flash to
-   pick a move to survive while eating pellets; then ONE call to
-   gemini-2.5-flash-lite decides all four ghosts at once. After each game the
-   learning step (Reflexion) runs on gemini-2.5-flash-lite and rewrites the
-   ghosts' .md. Pac-Man has NO memory; only the ghosts learn. Sub-turn controls,
-   scoring, metrics, and rounds are unchanged.
+   OmegaPacman — Gemini co-evolution variant. Every model call goes through
+   Google's Gemini OpenAI-compatible endpoint. Each turn Pac-Man asks PACMAN_MODEL
+   to pick a move (reading its own pacman.md); then ONE call to GHOST_MODEL decides
+   all four ghosts at once (reading their per-ghost + team notes). After each game
+   BOTH sides learn (Reflexion): the ghosts collectively rewrite their 5 notes and
+   Pac-Man solo rewrites pacman.md — so collective vs solo learning co-evolve.
+   Sub-turn controls, scoring, metrics, and rounds are unchanged.
    =================================================================== */
 
 // ---- world data ---------------------------------------------------------
@@ -623,8 +623,8 @@ const START = {
   ghosts: [ { r: 1, c: 1 }, { r: 1, c: 8 }, { r: 8, c: 1 }, { r: 8, c: 8 } ],
 };
 // Pac-Man is Gemini-driven too: each turn Gemini picks its move to survive the
-// ghosts while collecting pellets (see decidePacmanGemini). Pac-Man has NO .md /
-// no memory — it does not learn.
+// ghosts while collecting pellets (see decidePacmanGemini). Pac-Man reads its own
+// single pacman.md and learns solo between rounds (see learnPacman).
 
 // 10x10 maze (1=wall, 0=floor).
 const MAZE = [
@@ -644,13 +644,14 @@ const MAZE_TEXT = MAZE.map(row => row.map(v => (v ? "#" : ".")).join("")).join("
 
 // ---- Gemini (Google AI Studio, OpenAI-compatible) config ----------------
 // UNIFIED: every model call goes through Gemini's OpenAI-compatible endpoint.
-// Pac-Man, the ghosts, and the learning step each use their own model below.
+// Two models, easy to swap for future experiments. Each agent uses its OWN model
+// for BOTH play and learning (co-evolution): Pac-Man learns solo; the ghosts
+// learn collectively (shared + per-ghost notes).
 // The API key is read from the ⚙️ key input (game.apiKey) or a
 // globalThis.GEMINI_API_KEY env-like override — it is never hardcoded.
 const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";
-const GEMINI_PACMAN_MODEL = "gemini-3.5-flash";        // Pac-Man play
-const GEMINI_GHOSTS_MODEL = "gemini-2.5-flash-lite";   // combined 4-ghost play
-const GEMINI_LEARN_MODEL  = "gemini-2.5-flash-lite";   // learning (rewrite .md notes)
+const PACMAN_MODEL = "gemini-3.5-flash";        // Pac-Man play + solo learning
+const GHOST_MODEL  = "gemini-2.5-flash-lite";   // 4-ghost play + collective learning
 function apiKey() {
   return (game.apiKey || (typeof globalThis !== "undefined" && globalThis.GEMINI_API_KEY) || "").trim();
 }
@@ -662,6 +663,7 @@ const DIRV = { up: [-1, 0], down: [1, 0], left: [0, -1], right: [0, 1] };
 // notes, so early games look near-random (expected). Learning that fills these
 // in comes in STEP 3.
 const MEMORY = {
+  pacman:   "# Pac-Man\n\n(no strategy yet — learning comes later)\n",
   atlanta:  "# Atlanta\n\n(no strategy yet — learning comes later)\n",
   berkeley: "# Berkeley\n\n(no strategy yet — learning comes later)\n",
   chicago:  "# Chicago\n\n(no strategy yet — learning comes later)\n",
@@ -902,26 +904,26 @@ async function decideGhostsGemini() {
   let parsed = {}, success = false;
   for (let attempt = 0; attempt < TRIES; attempt++) {
     try {
-      const reply = await callGemini(messages, GEMINI_GHOSTS_MODEL);
+      const reply = await callGemini(messages, GHOST_MODEL);
       parsed = parseGhostsReply(reply);
       if (!Object.keys(parsed).length) throw new Error("no ghost moves parsed: " + oneLine(reply));
-      logApi("Ghosts", `success (try ${attempt + 1}/${TRIES}) — ${Object.keys(parsed).length}/4 parsed`, false, GEMINI_GHOSTS_MODEL);
+      logApi("Ghosts", `success (try ${attempt + 1}/${TRIES}) — ${Object.keys(parsed).length}/4 parsed`, false, GHOST_MODEL);
       success = true;
       break;
     } catch (e) {
       console.log(`[OmegaPacman] Ghosts try ${attempt + 1}/${TRIES} failed: ${e.message}`);
-      logApi("Ghosts", `try ${attempt + 1}/${TRIES} failed: ${oneLine(e.message)}`, true, GEMINI_GHOSTS_MODEL);
+      logApi("Ghosts", `try ${attempt + 1}/${TRIES} failed: ${oneLine(e.message)}`, true, GHOST_MODEL);
       if (attempt < TRIES - 1) await sleep(500 * Math.pow(2, attempt) + Math.random() * 400);
     }
   }
-  if (!success) logApi("Ghosts", `fallback — all ${TRIES} Gemini tries failed; each ghost moves randomly`, true, GEMINI_GHOSTS_MODEL);
+  if (!success) logApi("Ghosts", `fallback — all ${TRIES} Gemini tries failed; each ghost moves randomly`, true, GHOST_MODEL);
 
   return GHOSTS.map(g => {
     const p = parsed[g.key];
     if (p) return { g, move: p.move, dir: p.dir, reason: p.reason, fallback: false };
     const legal = moveOptions(g.pos, false);
     const mv = legal.length ? pickRandom(legal) : { ...g.pos };
-    if (success) logApi(g.name, `missing/illegal in ghost reply — random fallback → ${dirOf(g.pos, mv)}`, true, GEMINI_GHOSTS_MODEL);
+    if (success) logApi(g.name, `missing/illegal in ghost reply — random fallback → ${dirOf(g.pos, mv)}`, true, GHOST_MODEL);
     return {
       g, move: mv, dir: dirOf(g.pos, mv),
       reason: success ? "(random fallback — missing/illegal move)" : "(random fallback — Gemini unavailable)",
@@ -930,8 +932,8 @@ async function decideGhostsGemini() {
   });
 }
 
-// Build the textual decision context handed to Gemini for Pac-Man. Pac-Man has
-// NO notes/memory — only the live game state goes in.
+// Build the textual decision context handed to Gemini for Pac-Man — the live
+// game state plus Pac-Man's own pacman.md notes (read exactly like the ghosts).
 function buildPacmanContext() {
   const ghosts = GHOSTS.map(g => `${g.name} (${g.pos.r},${g.pos.c})`).join(", ");
   const legal = ["up", "down", "left", "right"].map(dir => {
@@ -955,6 +957,9 @@ function buildPacmanContext() {
     `Remaining pellets (${game.pellets.size}): ${pellets}.`,
     `Your legal moves: ${legal}.`,
     ``,
+    `--- your notes (pacman.md) ---`,
+    (MEMORY.pacman || "").trim(),
+    ``,
     `Choose exactly ONE legal move (one that is "open", not a wall) that best avoids the ghosts while collecting pellets.`,
     `Reply on a single line EXACTLY as:  MOVE: <up|down|left|right> | REASON: <one short sentence>`,
   ].join("\n");
@@ -973,19 +978,19 @@ async function decidePacmanGemini() {
   const TRIES = 5;
   for (let attempt = 0; attempt < TRIES; attempt++) {
     try {
-      const reply = await callGemini(messages, GEMINI_PACMAN_MODEL);
+      const reply = await callGemini(messages, PACMAN_MODEL);
       const parsed = parseGhostReply(reply, PACMAN);
-      if (parsed) { logApi("Pac-Man", `success (try ${attempt + 1}/${TRIES})`, false, GEMINI_PACMAN_MODEL); return { ...parsed, fallback: false }; }
+      if (parsed) { logApi("Pac-Man", `success (try ${attempt + 1}/${TRIES})`, false, PACMAN_MODEL); return { ...parsed, fallback: false }; }
       throw new Error("unparseable/illegal reply: " + oneLine(reply));
     } catch (e) {
       console.log(`[OmegaPacman] Pac-Man try ${attempt + 1}/${TRIES} failed: ${e.message}`);
-      logApi("Pac-Man", `try ${attempt + 1}/${TRIES} failed: ${oneLine(e.message)}`, true, GEMINI_PACMAN_MODEL);
+      logApi("Pac-Man", `try ${attempt + 1}/${TRIES} failed: ${oneLine(e.message)}`, true, PACMAN_MODEL);
       if (attempt < TRIES - 1) await sleep(500 * Math.pow(2, attempt) + Math.random() * 400);
     }
   }
   const mv = pickRandom(legal);
   console.log(`[OmegaPacman] Pac-Man: all ${TRIES} tries failed — random fallback ${dirOf(PACMAN.pos, mv)}`);
-  logApi("Pac-Man", `fallback-to-random → ${dirOf(PACMAN.pos, mv)} (all ${TRIES} Gemini tries failed)`, true, GEMINI_PACMAN_MODEL);
+  logApi("Pac-Man", `fallback-to-random → ${dirOf(PACMAN.pos, mv)} (all ${TRIES} Gemini tries failed)`, true, PACMAN_MODEL);
   return { move: mv, dir: dirOf(PACMAN.pos, mv), reason: "(random fallback — Gemini unavailable)", fallback: true };
 }
 
@@ -1029,9 +1034,12 @@ function escapeHtml(s) {
 }
 
 // ===================================================================
-// Learning (Reflexion) — after each game, ONE Gemini call reads the game's
-// transcript + the current 5 .md and REWRITES all 5 so the ghosts improve.
-// Only ghosts learn; Pac-Man has no .md.
+// Learning (Reflexion) — after each game BOTH sides reflect (co-evolution):
+//   • the ghosts learn COLLECTIVELY: ONE call rewrites their 5 shared/per-ghost
+//     notes (GHOST_MODEL); see learnFromGame.
+//   • Pac-Man learns SOLO: ONE call rewrites its single pacman.md (PACMAN_MODEL);
+//     see learnPacman.
+// Both read the same game transcript and run at game end.
 // ===================================================================
 const LEARN_KEYS = ["atlanta", "berkeley", "chicago", "delaware", "team"];
 
@@ -1119,19 +1127,80 @@ async function learnFromGame(win) {
   const TRIES = 4;
   for (let attempt = 0; attempt < TRIES; attempt++) {
     try {
-      const reply = await callGemini(messages, GEMINI_LEARN_MODEL);
+      const reply = await callGemini(messages, GHOST_MODEL);
       const blocks = parseLearning(reply);
       if (!Object.keys(blocks).length) throw new Error("no notes parsed: " + oneLine(reply));
       const n = applyLearning(blocks);
-      logApi("Learning", `success (try ${attempt + 1}/${TRIES}) — ${n}/5 notes rewritten`, false, GEMINI_LEARN_MODEL);
+      logApi("Learning", `success (try ${attempt + 1}/${TRIES}) — ${n}/5 notes rewritten`, false, GHOST_MODEL);
       return;
     } catch (e) {
       console.log(`[OmegaPacman] Learning try ${attempt + 1}/${TRIES} failed: ${e.message}`);
-      logApi("Learning", `try ${attempt + 1}/${TRIES} failed: ${oneLine(e.message)}`, true, GEMINI_LEARN_MODEL);
+      logApi("Learning", `try ${attempt + 1}/${TRIES} failed: ${oneLine(e.message)}`, true, GHOST_MODEL);
       if (attempt < TRIES - 1) await sleep(500 * Math.pow(2, attempt) + Math.random() * 400);
     }
   }
-  logApi("Learning", `fallback — notes unchanged (all ${TRIES} Gemini tries failed)`, true, GEMINI_LEARN_MODEL);
+  logApi("Learning", `fallback — notes unchanged (all ${TRIES} Gemini tries failed)`, true, GHOST_MODEL);
+}
+
+// ---- Pac-Man SOLO learning (mirrors the ghost step, one agent) ----------
+function buildPacmanLearningContext(win) {
+  const outcome = win
+    ? `OUTCOME: you (Pac-Man) were CAUGHT on turn ${game.turn}. Final score ${game.score} (higher = caught faster, which is BAD for you).`
+    : `OUTCOME: you (Pac-Man) SURVIVED all ${MAX_TURN} turns and escaped the ghosts.`;
+  return [
+    `You are Pac-Man, a solo agent learning to survive four cooperating ghosts on a 10x10 maze (coordinates row,col with row 0 at the top) while eating pellets.`,
+    `A game just finished. Study the move-by-move transcript and your current notes, then REWRITE your notes so you SURVIVE LONGER next game — avoid getting cornered, keep escape routes open, and only grab pellets when it is safe.`,
+    ``,
+    `MAZE (#=wall, .=floor):`,
+    MAZE_TEXT,
+    ``,
+    outcome,
+    ``,
+    `TRANSCRIPT (each line: turn, who moved which direction, resulting positions Pac/A/B/C/D, and the reason given):`,
+    game.transcript.length ? game.transcript.join("\n") : "(no moves recorded)",
+    ``,
+    `YOUR CURRENT NOTES:`,
+    `===PACMAN===`, (MEMORY.pacman || "").trim(), `===END===`,
+    ``,
+    `Write concrete, human-readable guidance in plain language about positions and directions — where to flee, which corridors are dead-end traps, how to keep maximum distance from the ghosts, when it is safe to detour for pellets. Do NOT invent fixed keyword commands. Add brief "# reason" lines explaining each idea.`,
+    `Reply EXACTLY in this delimited format and nothing else (no JSON, no code fences):`,
+    `===PACMAN===`,
+    `<your notes>`,
+    `===END===`,
+  ].join("\n");
+}
+
+// Tolerant parse: take the ===PACMAN===...===END=== block; if the model omitted
+// the delimiters, fall back to the whole reply. Returns "" only if truly empty.
+function parsePacmanLearning(text) {
+  const m = (text || "").match(/===PACMAN===([\s\S]*?)===END===/i);
+  const body = (m ? m[1] : (text || "")).trim();
+  return body;
+}
+
+// ONE solo learning call for Pac-Man (PACMAN_MODEL), mirroring learnFromGame.
+async function learnPacman(win) {
+  const messages = [
+    { role: "system", content: "You are Pac-Man improving your own survival notes after each game so you live longer. Reply only in the exact delimited format requested." },
+    { role: "user", content: buildPacmanLearningContext(win) },
+  ];
+  const TRIES = 4;
+  for (let attempt = 0; attempt < TRIES; attempt++) {
+    try {
+      const reply = await callGemini(messages, PACMAN_MODEL);
+      const body = parsePacmanLearning(reply);
+      if (!body) throw new Error("no notes parsed: " + oneLine(reply));
+      MEMORY.pacman = body.endsWith("\n") ? body : body + "\n";
+      renderGhostMem();                                 // show the updated pacman.md live
+      logApi("Learning", `Pac-Man notes rewritten (try ${attempt + 1}/${TRIES})`, false, PACMAN_MODEL);
+      return;
+    } catch (e) {
+      console.log(`[OmegaPacman] Pac-Man learning try ${attempt + 1}/${TRIES} failed: ${e.message}`);
+      logApi("Learning", `Pac-Man try ${attempt + 1}/${TRIES} failed: ${oneLine(e.message)}`, true, PACMAN_MODEL);
+      if (attempt < TRIES - 1) await sleep(500 * Math.pow(2, attempt) + Math.random() * 400);
+    }
+  }
+  logApi("Learning", `Pac-Man notes unchanged (all ${TRIES} Gemini tries failed)`, true, PACMAN_MODEL);
 }
 
 // ---- per-round metrics --------------------------------------------------
@@ -1241,7 +1310,7 @@ async function doSubTurn() {
       dec = await decidePacmanGemini();            // Gemini decides Pac-Man's move
       if (game.status !== "playing") return;       // game was reset mid-call
     } else {
-      logApi("Pac-Man", "no API key — random move (no Gemini call)", true, GEMINI_PACMAN_MODEL);
+      logApi("Pac-Man", "no API key — random move (no Gemini call)", true, PACMAN_MODEL);
       const opts = moveOptions(PACMAN.pos, false);
       const mv = opts.length ? pickRandom(opts) : { ...PACMAN.pos };
       dec = { move: mv, dir: dirOf(PACMAN.pos, mv), reason: "(no API key — random move)", fallback: true };
@@ -1258,7 +1327,7 @@ async function doSubTurn() {
       decs = await decideGhostsGemini();            // ONE call decides all four
       if (game.status !== "playing") return;        // game was reset mid-call
     } else {
-      logApi("Ghosts", "no API key — random moves (no Gemini call)", true, GEMINI_GHOSTS_MODEL);
+      logApi("Ghosts", "no API key — random moves (no Gemini call)", true, GHOST_MODEL);
       decs = GHOSTS.map(g => {
         const opts = moveOptions(g.pos, false);
         const mv = opts.length ? pickRandom(opts) : { ...g.pos };
@@ -1368,12 +1437,12 @@ async function endGame(win) {
   again.textContent = game.round < game.rounds ? "Next Round" : "Play Again";
   renderMetrics();
 
-  // LEARNING: ghosts reflect on this game and rewrite their .md before the next
-  // round. Show "Ghosts are learning…" while the single Gemini call runs, so the
-  // updated notes are already visible in the Memory panel when the modal opens.
+  // LEARNING (co-evolution): both sides reflect on this game and rewrite their
+  // notes before the next round — the ghosts collectively and Pac-Man solo, in
+  // parallel. The updated notes are visible in the Memory panel when the modal opens.
   if (apiKey()) {
-    setTurnLabel("Ghosts are learning…", "var(--accent)", true);
-    await learnFromGame(win);
+    setTurnLabel("Pac-Man & ghosts are learning…", "var(--accent)", true);
+    await Promise.all([learnFromGame(win), learnPacman(win)]);
   }
   show("resultModal", true);                        // modal over the board (no page switch)
   scheduleAutoProceed();                            // if Auto is on, advance to the next round
@@ -1454,11 +1523,11 @@ document.getElementById("textToggle").addEventListener("click", () => {
 
 // ---- memory panel: TOP (per-ghost, auto-following) + BOTTOM (team) -------
 function renderGhostMem() {
-  const isPac = game.activeGhost === "pacman";
-  // Pac-Man has no .md (it doesn't learn) — show the "?" placeholder instead.
-  document.getElementById("ghostMd").classList.toggle("hidden", isPac);
-  document.getElementById("pacNoMem").classList.toggle("hidden", !isPac);
-  if (!isPac) document.getElementById("ghostMd").textContent = MEMORY[game.activeGhost];
+  // Pac-Man now has its OWN pacman.md (solo learning), so every actor — Pac-Man
+  // and the four ghosts — shows its live notes in the same box (no more "?").
+  document.getElementById("pacNoMem").classList.add("hidden");
+  document.getElementById("ghostMd").classList.remove("hidden");
+  document.getElementById("ghostMd").textContent = MEMORY[game.activeGhost] || "";
   document.querySelectorAll("#ghostTabs .memtab").forEach(t =>
     t.classList.toggle("active", t.dataset.ghost === game.activeGhost));
 }
@@ -1473,11 +1542,6 @@ document.querySelectorAll("#ghostTabs .memtab").forEach(tab =>
   }));
 
 // ---- full-content memory popup ------------------------------------------
-const PAC_NO_MEM_TEXT =
-  "Pac-Man moves randomly — no memory, no strategy.\n\n" +
-  "Pac-Man has no SKILL.md because it does not learn. Only the four ghosts " +
-  "(Atlanta, Berkeley, Chicago, Delaware) keep strategy files and improve them " +
-  "between rounds.";
 const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
 
 function openMdModal(title, body) {
@@ -1487,8 +1551,8 @@ function openMdModal(title, body) {
 }
 // Clicking the per-actor box opens the current actor's full content.
 function openActorMem() {
-  if (game.activeGhost === "pacman") openMdModal("Pacman", PAC_NO_MEM_TEXT);
-  else openMdModal(cap(game.activeGhost), MEMORY[game.activeGhost]);
+  const title = game.activeGhost === "pacman" ? "Pac-Man" : cap(game.activeGhost);
+  openMdModal(title, MEMORY[game.activeGhost] || "");
 }
 document.getElementById("ghostMd").addEventListener("click", openActorMem);
 document.getElementById("pacNoMem").addEventListener("click", openActorMem);
