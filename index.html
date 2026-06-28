@@ -470,7 +470,7 @@
         <input id="apikeyInput" type="password" autocomplete="off" spellcheck="false"
                placeholder="AIza..." />
       </label>
-      <p class="hint">Used for every model call via Gemini: Pac-Man play + learning (gemini-3.1-flash-lite) and the ghosts' play + learning (gemini-2.5-flash-lite). Stored in memory only for this session.</p>
+      <p class="hint">Used for every per-move call, sent DIRECTLY to Gemini (gemini-2.5-flash-lite) for both Pac-Man and the ghosts. Ghost learning runs separately on the local server. Stored in memory only for this session.</p>
       <div class="row">
         <button data-go="start">Back</button>
         <button class="primary" id="apikeyNext">Next</button>
@@ -605,7 +605,7 @@
       <label class="field">Google AI Studio API key
         <input id="settingsKey" type="password" autocomplete="off" spellcheck="false" placeholder="AIza..." />
       </label>
-      <p class="hint">Used for all Gemini calls: Pac-Man play + learning (gemini-3.1-flash-lite), ghosts play + learning (gemini-2.5-flash-lite). Kept in memory only.</p>
+      <p class="hint">Used for every per-move call sent directly to Gemini (gemini-2.5-flash-lite) for Pac-Man and the ghosts. Ghost learning runs on the local server. Kept in memory only.</p>
       <div class="row">
         <button id="settingsCancel">Cancel</button>
         <button class="primary" id="settingsClose">Save</button>
@@ -665,21 +665,17 @@ const MAZE = MAZE_ASCII.map(row => [...row].map(ch => (ch === "#" ? 1 : 0)));
 const ROWS = 14, COLS = 34;
 const MAZE_TEXT = MAZE_ASCII.join("\n");
 
-// ---- Local move server (Vertex AI) config -------------------------------
-// The browser no longer calls Gemini directly. Each per-move decision POSTs the
-// game state to the LOCAL server, which runs Vertex AI / gemini-3.5-flash via
-// gcloud ADC (the browser can't use ADC). Both Pac-Man and the ghosts go through
-// this server. Ghost LEARNING still uses the /analyze (Antigravity) call.
-const SERVER_BASE = "http://localhost:5000";
-const PACMAN_MOVE_URL = SERVER_BASE + "/pacman_move";   // {maze,pacman,ghosts,legal,rule} -> {move}
-const GHOST_MOVE_URL  = SERVER_BASE + "/ghost_move";    // {maze,name,pos,pacman,others,legal,skill,team} -> {move}
-const SAVE_ROUND_URL  = SERVER_BASE + "/save_round";    // {game,round,game_log,result,mds} (fire-and-forget)
-const PACMAN_MODEL = "gemini-3.5-flash";   // served by the local Vertex server (log label)
-const GHOST_MODEL  = "gemini-3.5-flash";   // served by the local Vertex server (log label)
-
-// Legacy direct-Gemini config — no longer used for moves (kept for the unused
-// learnFromGame/learnPacman helpers). The browser sends no Bearer key now.
+// ---- Move + server config -----------------------------------------------
+// PER-MOVE calls go DIRECTLY from the browser to Gemini's OpenAI-compatible
+// endpoint (Bearer = the API key the user enters at game start) — fast, no server
+// round-trip. Only the SLOW learning + saving still POST to the local server:
+//   • /analyze    — Antigravity ghost learning (every game)
+//   • /save_round — per-round experiment save (fire-and-forget)
 const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";
+const PACMAN_MODEL = "gemini-2.5-flash-lite";   // Pac-Man moves (direct Gemini)
+const GHOST_MODEL  = "gemini-2.5-flash-lite";   // ghost moves (direct Gemini)
+const SERVER_BASE = "http://localhost:5000";
+const SAVE_ROUND_URL = SERVER_BASE + "/save_round";   // {game,round,game_log,result,mds} (fire-and-forget)
 function apiKey() {
   return (game.apiKey || (typeof globalThis !== "undefined" && globalThis.GEMINI_API_KEY) || "").trim();
 }
@@ -919,71 +915,44 @@ async function callModel(messages, model) {
   return text;
 }
 
-// ---- per-move server calls (Vertex AI via the local server) -------------
-const posStr = p => `(${p.r},${p.c})`;
-// The legal direction names from a cell (only those leading to floor).
-function legalDirsOf(pos) {
-  return ["up", "down", "left", "right"].filter(d => {
-    const [dr, dc] = DIRV[d];
-    return isFloor(pos.r + dr, pos.c + dc);
-  });
-}
-// POST a move request to the server and return a validated direction (one of
-// legalDirs) or throw. Both endpoints return {"move":"<direction>"}.
-async function requestMove(url, payload, legalDirs) {
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  if (!res.ok) throw new Error("HTTP " + res.status);
-  const data = await res.json();
-  const dir = String((data && data.move) || "").trim().toLowerCase();
-  if (!legalDirs.includes(dir)) throw new Error("illegal/missing move: " + JSON.stringify(data && data.move));
-  return dir;
-}
-const cellInDir = (pos, dir) => { const [dr, dc] = DIRV[dir]; return { r: pos.r + dr, c: pos.c + dc }; };
-
-// Decide each ghost via its OWN /ghost_move server call (one POST per ghost),
-// then they are applied together. ~3 tries each, then a random-legal fallback for
-// just that ghost. Returns {g, move, dir, reason, fallback}[] in GHOSTS order.
-async function decideGhostsServer() {
-  const decs = [];
-  for (const g of GHOSTS) {
-    const legalDirs = legalDirsOf(g.pos);
-    if (!legalDirs.length) { decs.push({ g, move: { ...g.pos }, dir: "stay", reason: "no legal move", fallback: false }); continue; }
-    const payload = {
-      maze: MAZE_TEXT,
-      name: g.name,
-      pos: posStr(g.pos),
-      pacman: posStr(PACMAN.pos),
-      others: GHOSTS.filter(o => o !== g).map(o => posStr(o.pos)),
-      legal: legalDirs.join(","),
-      skill: (MEMORY[g.key] || "").trim(),
-      team: (MEMORY.team || "").trim(),
-    };
-    const TRIES = 3;
-    let dir = null;
-    for (let attempt = 0; attempt < TRIES; attempt++) {
-      try {
-        dir = await requestMove(GHOST_MOVE_URL, payload, legalDirs);
-        logApi(g.name, `success (try ${attempt + 1}/${TRIES}) → ${dir}`, false, GHOST_MODEL);
-        break;
-      } catch (e) {
-        console.log(`[OmegaPacman] ${g.name} move try ${attempt + 1}/${TRIES} failed: ${e.message}`);
-        logApi(g.name, `try ${attempt + 1}/${TRIES} failed: ${oneLine(e.message)}`, true, GHOST_MODEL);
-        if (attempt < TRIES - 1) await sleep(500 * Math.pow(2, attempt) + Math.random() * 400);
-      }
-    }
-    if (!dir) {
-      dir = pickRandom(legalDirs);
-      logApi(g.name, `fallback-to-random → ${dir} (server unavailable)`, true, GHOST_MODEL);
-      decs.push({ g, move: cellInDir(g.pos, dir), dir, reason: "(random fallback — server unavailable)", fallback: true });
-    } else {
-      decs.push({ g, move: cellInDir(g.pos, dir), dir, reason: "(server)", fallback: false });
+// Decide ALL four ghosts in ONE DIRECT Gemini call (browser → Gemini, Bearer key):
+// ~5 tries with backoff+jitter. Returns {g, move, dir, reason, fallback}[] in
+// GHOSTS order. Any ghost missing/illegal in the reply gets a random-legal move.
+async function decideGhostsGemini() {
+  const messages = [
+    { role: "system", content: "You control all four cooperating ghosts at once to catch Pac-Man in a maze; they move simultaneously. Think briefly, then answer in the exact requested format." },
+    { role: "user", content: buildGhostsContext() },
+  ];
+  const TRIES = 5;
+  let parsed = {}, success = false;
+  for (let attempt = 0; attempt < TRIES; attempt++) {
+    try {
+      const reply = await callModel(messages, GHOST_MODEL);
+      parsed = parseGhostsReply(reply);
+      if (!Object.keys(parsed).length) throw new Error("no ghost moves parsed: " + oneLine(reply));
+      logApi("Ghosts", `success (try ${attempt + 1}/${TRIES}) — ${Object.keys(parsed).length}/4 parsed`, false, GHOST_MODEL);
+      success = true;
+      break;
+    } catch (e) {
+      console.log(`[OmegaPacman] Ghosts try ${attempt + 1}/${TRIES} failed: ${e.message}`);
+      logApi("Ghosts", `try ${attempt + 1}/${TRIES} failed: ${oneLine(e.message)}`, true, GHOST_MODEL);
+      if (attempt < TRIES - 1) await sleep(500 * Math.pow(2, attempt) + Math.random() * 400);
     }
   }
-  return decs;
+  if (!success) logApi("Ghosts", `fallback — all ${TRIES} Gemini tries failed; each ghost moves randomly`, true, GHOST_MODEL);
+
+  return GHOSTS.map(g => {
+    const p = parsed[g.key];
+    if (p) return { g, move: p.move, dir: p.dir, reason: p.reason, fallback: false };
+    const legal = moveOptions(g.pos, false);
+    const mv = legal.length ? pickRandom(legal) : { ...g.pos };
+    if (success) logApi(g.name, `missing/illegal in ghost reply — random fallback → ${dirOf(g.pos, mv)}`, true, GHOST_MODEL);
+    return {
+      g, move: mv, dir: dirOf(g.pos, mv),
+      reason: success ? "(random fallback — missing/illegal move)" : "(random fallback — Gemini unavailable)",
+      fallback: true,
+    };
+  });
 }
 
 // Build the textual decision context handed to Gemini for Pac-Man — the live
@@ -1019,35 +988,34 @@ function buildPacmanContext() {
   ].join("\n");
 }
 
-// Decide Pac-Man's move via its /pacman_move server call. ~5 tries with backoff,
-// then a random-legal fallback. Returns {move, dir, reason, fallback}.
+// Decide Pac-Man's move via a DIRECT Gemini call (browser → Gemini, Bearer key):
+// ~5 tries with backoff, then a random-legal fallback. parseGhostReply works for
+// any entity with a .pos (PACMAN has one). Returns {move, dir, reason, fallback}.
 async function decidePacman() {
-  const legalDirs = legalDirsOf(PACMAN.pos);
-  if (!legalDirs.length) return { move: { ...PACMAN.pos }, dir: "stay", reason: "no legal move", fallback: false };
+  const legal = moveOptions(PACMAN.pos, false);
+  if (!legal.length) return { move: { ...PACMAN.pos }, dir: "stay", reason: "no legal move", fallback: false };
 
-  const payload = {
-    maze: MAZE_TEXT,
-    pacman: posStr(PACMAN.pos),
-    ghosts: GHOSTS.map(g => posStr(g.pos)),
-    legal: legalDirs.join(","),
-    rule: (MEMORY.pacman || "").trim(),
-  };
+  const messages = [
+    { role: "system", content: "You are Pac-Man trying to survive four hunting ghosts in a maze while eating pellets. Think briefly, then answer in the exact requested format." },
+    { role: "user", content: buildPacmanContext() },
+  ];
   const TRIES = 5;
   for (let attempt = 0; attempt < TRIES; attempt++) {
     try {
-      const dir = await requestMove(PACMAN_MOVE_URL, payload, legalDirs);
-      logApi("Pac-Man", `success (try ${attempt + 1}/${TRIES}) → ${dir}`, false, PACMAN_MODEL);
-      return { move: cellInDir(PACMAN.pos, dir), dir, reason: "(server)", fallback: false };
+      const reply = await callModel(messages, PACMAN_MODEL);
+      const parsed = parseGhostReply(reply, PACMAN);
+      if (parsed) { logApi("Pac-Man", `success (try ${attempt + 1}/${TRIES})`, false, PACMAN_MODEL); return { ...parsed, fallback: false }; }
+      throw new Error("unparseable/illegal reply: " + oneLine(reply));
     } catch (e) {
-      console.log(`[OmegaPacman] Pac-Man move try ${attempt + 1}/${TRIES} failed: ${e.message}`);
+      console.log(`[OmegaPacman] Pac-Man try ${attempt + 1}/${TRIES} failed: ${e.message}`);
       logApi("Pac-Man", `try ${attempt + 1}/${TRIES} failed: ${oneLine(e.message)}`, true, PACMAN_MODEL);
       if (attempt < TRIES - 1) await sleep(500 * Math.pow(2, attempt) + Math.random() * 400);
     }
   }
-  const dir = pickRandom(legalDirs);
-  console.log(`[OmegaPacman] Pac-Man: all ${TRIES} server tries failed — random fallback ${dir}`);
-  logApi("Pac-Man", `fallback-to-random → ${dir} (all ${TRIES} server tries failed)`, true, PACMAN_MODEL);
-  return { move: cellInDir(PACMAN.pos, dir), dir, reason: "(random fallback — server unavailable)", fallback: true };
+  const mv = pickRandom(legal);
+  console.log(`[OmegaPacman] Pac-Man: all ${TRIES} tries failed — random fallback ${dirOf(PACMAN.pos, mv)}`);
+  logApi("Pac-Man", `fallback-to-random → ${dirOf(PACMAN.pos, mv)} (all ${TRIES} Gemini tries failed)`, true, PACMAN_MODEL);
+  return { move: mv, dir: dirOf(PACMAN.pos, mv), reason: "(random fallback — Gemini unavailable)", fallback: true };
 }
 
 // The big top label carries the LIVE status of the actor in play: who is
@@ -1366,7 +1334,7 @@ async function doSubTurn() {
   if (i === 0) {
     // Pac-Man move via the local server (no API key needed); has its own fallback.
     setThinking(PAC);
-    const dec = await decidePacman();              // server (Vertex) decides Pac-Man's move
+    const dec = await decidePacman();              // direct Gemini decides Pac-Man's move
     if (game.status !== "playing") return;         // game was reset mid-call
     dec.from = { ...PACMAN.pos };                   // capture from-cell before applying
     PACMAN.pos = dec.move;
@@ -1374,9 +1342,9 @@ async function doSubTurn() {
     showMoveInfo(PAC, dec);                         // "Pac-Man → left · …" + log with coords
     recordTurn("Pac-Man", dec.dir, dec.reason);
   } else {
-    // Ghosts decided via the local server (one /ghost_move call per ghost), moved together.
+    // Ghosts decided by ONE direct Gemini call (all four), then moved together.
     setTurnLabel("Ghosts are deciding…", "var(--accent)", true);
-    const decs = await decideGhostsServer();
+    const decs = await decideGhostsGemini();
     if (game.status !== "playing") return;          // game was reset mid-call
     decs.forEach(d => {                              // apply all four together
       d.from = { ...d.g.pos };                       // capture from-cell before applying
