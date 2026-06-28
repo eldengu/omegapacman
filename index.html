@@ -158,16 +158,32 @@
   #turnlabel {
     width: 100%;
     max-width: 1100px;
+    min-height: 64px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: 0 6px;
     text-align: center;
-    font-size: 34px;
+    font-size: 30px;
     font-weight: bold;
-    letter-spacing: 2px;
+    letter-spacing: 1px;
     margin: 14px 0;
-    padding: 10px;
+    padding: 10px 16px;
     border-radius: 12px;
     background: var(--panel-2);
     border: 1px solid var(--edge);
     text-shadow: 0 0 14px currentColor;
+    line-height: 1.25;
+  }
+  #turnlabel.thinking { font-style: italic; text-shadow: none; }
+  #turnlabel .tl-actor { font-weight: bold; }
+  #turnlabel .tl-reason {
+    font-size: 17px;
+    font-weight: normal;
+    letter-spacing: 0;
+    color: var(--muted);
+    text-shadow: none;
   }
 
   #gamerow {
@@ -248,21 +264,6 @@
     max-width: 100%;
   }
   .boardctrls { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
-  #moveinfo {
-    width: var(--board-size);
-    min-height: 40px;
-    background: var(--panel);
-    border: 1px solid var(--edge);
-    border-radius: 8px;
-    padding: 8px 12px;
-    font-size: 12px;
-    line-height: 1.4;
-    color: var(--ink);
-    text-align: center;
-  }
-  #moveinfo .mi-actor { font-weight: bold; }
-  #moveinfo .mi-reason { color: var(--muted); }
-  #moveinfo.thinking { color: var(--muted); font-style: italic; }
 
   /* memory panel: TOP (per-actor, auto-switching) + BOTTOM (team, fixed) */
   #memorypane {
@@ -430,7 +431,7 @@
       <button id="gear" class="ghosticon" title="Settings">⚙️</button>
     </div>
 
-    <div id="turnlabel">Pacman's Turn</div>
+    <div id="turnlabel">Pac-Man — to move</div>
 
     <div id="gamerow">
       <div id="boardpane">
@@ -442,7 +443,6 @@
           <button id="fwdBtn" title="Step forward one turn">&raquo;</button>
           <button id="textToggle" title="Switch board / text view">Text view</button>
         </div>
-        <div id="moveinfo" title="Grok's chosen move + reason">Grok decides the ghosts. Add your xAI key in ⚙️ Settings, then press ▶ / ».</div>
       </div>
 
       <div id="memorypane">
@@ -476,18 +476,17 @@
     </div>
   </section>
 
-  <!-- ============ SCREEN 5: RESULT ============ -->
-  <section id="screen-result" class="screen">
-    <h1 class="title">OmegaPacman</h1>
+  <!-- ============ END-OF-GAME RESULT (modal over the board) ============ -->
+  <div id="resultModal" class="overlay hidden">
     <div class="card">
       <div id="resVerdict" class="verdict win">VICTORY</div>
       <div id="resLine" class="resultline">Round 1 — score 80, caught in 12 turns</div>
       <div class="row">
         <button class="primary" id="againBtn">Play Again</button>
-        <button data-go="start">Main Menu</button>
+        <button id="resultMenu">Main Menu</button>
       </div>
     </div>
-  </section>
+  </div>
 
   <!-- ============ SETTINGS MENU (gear) ============ -->
   <div id="settingsMenu" class="overlay hidden">
@@ -584,14 +583,10 @@ const MEMORY = {
   team:     "# Team (shared)\n\n(no shared strategy yet — learning comes later)\n",
 };
 
-// Turn cycle: Pac-Man, then the four ghosts.
-const ACTORS = [
-  { label: "Pacman's Turn",   color: "var(--pac)" },
-  { label: "Atlanta's Turn",  color: "var(--atlanta)" },
-  { label: "Berkeley's Turn", color: "var(--berkeley)" },
-  { label: "Chicago's Turn",  color: "var(--chicago)" },
-  { label: "Delaware's Turn", color: "var(--delaware)" },
-];
+// Turn cycle length: Pac-Man, then the four ghosts (actor index 0..4). The
+// live status for each actor now lives in the big #turnlabel (see the status
+// helpers), so no per-actor label strings are needed here.
+const ACTORS = [0, 1, 2, 3, 4];
 
 // ---- scoring config -----------------------------------------------------
 const START_SCORE = 120;     // -1 per ghost move; 4 ghosts * 30 turns = 120
@@ -648,11 +643,18 @@ document.getElementById("playBtn").addEventListener("click", () => {
   showScreen("game");
 });
 
-// Result screen: advance to the next round in the series, or restart at round 1.
+// Result modal: advance to the next round in the series, or restart at round 1.
+// The board stays mounted behind the modal, so we only dismiss + reset — no
+// hard screen switch.
 document.getElementById("againBtn").addEventListener("click", () => {
+  show("resultModal", false);
   if (game.round < game.rounds) startRound(game.round + 1);
   else startRound(1);
-  showScreen("game");
+});
+document.getElementById("resultMenu").addEventListener("click", () => {
+  show("resultModal", false);
+  setPlaying(false);
+  showScreen("start");
 });
 
 // ===================================================================
@@ -815,18 +817,29 @@ async function decideGhostGrok(i, key) {
   return { move: mv, dir: dirOf(g.pos, mv), reason: "(random fallback — Grok unavailable)", fallback: true };
 }
 
-// Show the latest ghost decision (move + reason) under the board.
+// The big top label carries the LIVE status of the actor in play: who is
+// thinking/moving, and once a ghost moves, its decision + reason. Keeps the
+// actor's color so the board and label read as one.
+function setTurnLabel(html, color, thinking) {
+  const el = document.getElementById("turnlabel");
+  el.style.color = color;
+  el.classList.toggle("thinking", !!thinking);
+  el.innerHTML = html;
+}
+// Idle/ready state (round start, rewind): whose move is next.
+function setReadyLabel(actorIndex) {
+  if (actorIndex === 0) setTurnLabel("Pac-Man — to move", "var(--pac)", false);
+  else { const g = GHOSTS[actorIndex - 1]; setTurnLabel(`${g.name} — to move`, g.color, false); }
+}
+// Show the latest ghost decision (move + reason) in the big label.
 function showMoveInfo(g, dec) {
-  const el = document.getElementById("moveinfo");
-  el.classList.remove("thinking");
-  el.innerHTML =
-    `<span class="mi-actor" style="color:${g.color}">${g.name} → ${dec.dir}</span>` +
-    `<span class="mi-reason">${dec.fallback ? " " : " · "}${escapeHtml(dec.reason)}</span>`;
+  setTurnLabel(
+    `<span class="tl-actor">${g.name} → ${dec.dir}</span>` +
+    `<span class="tl-reason">${dec.fallback ? " " : " · "}${escapeHtml(dec.reason)}</span>`,
+    g.color, false);
 }
 function setThinking(g) {
-  const el = document.getElementById("moveinfo");
-  el.classList.add("thinking");
-  el.textContent = `${g.name} is deciding…`;
+  setTurnLabel(`${g.name} is deciding…`, g.color, true);
 }
 function escapeHtml(s) {
   return (s || "").replace(/[&<>]/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[ch]));
@@ -856,16 +869,16 @@ function startRound(roundNum) {
   buildBoard();
   renderTeamMem();
   renderGame();
+  setReadyLabel(game.actor);              // "Pac-Man — to move"
 }
 
 function renderGame() {
   document.getElementById("g-round").textContent = `${game.round} / ${game.rounds}`;
   document.getElementById("g-score").textContent = game.score;
   document.getElementById("g-turn").textContent = `${game.turn} / ${MAX_TURN}`;
-  const a = ACTORS[game.actor];
-  const label = document.getElementById("turnlabel");
-  label.textContent = a.label;
-  label.style.color = a.color;
+  // NOTE: the big #turnlabel is driven by the live status helpers
+  // (setThinking / showMoveInfo / setReadyLabel), not here — so a ghost's
+  // decision text survives the board re-render that follows its move.
 
   // Top memory panel auto-follows the current actor (Pac-Man or a ghost).
   game.activeGhost = game.actor === 0 ? "pacman" : GHOSTS[game.actor - 1].key;
@@ -909,7 +922,14 @@ async function doSubTurn() {
   const i = game.actor;
 
   if (i === 0) {
+    const from = { ...PACMAN.pos };
     pacmanMove();                                  // Pac-Man: forage-and-evade (local)
+    const dir = dirOf(from, PACMAN.pos);
+    setTurnLabel(                                   // big label carries Pac-Man's move
+      dir === "stay"
+        ? `<span class="tl-actor">Pac-Man holds position</span>`
+        : `<span class="tl-actor">Pac-Man → ${dir}</span>`,
+      "var(--pac)", false);
   } else {
     const g = GHOSTS[i - 1];
     let dec;
@@ -944,6 +964,7 @@ function stepBackward() {
   if (!history.length) return;
   restore(history.pop());
   renderGame();
+  setReadyLabel(game.actor);              // back to "<actor> — to move"
 }
 
 // Play = auto-advance via a self-scheduling loop (waits for each async sub-turn).
@@ -976,7 +997,7 @@ function endGame(win) {
     : `Round ${game.round} / ${game.rounds} — DEFEAT · Pac-Man survived ${MAX_TURN} turns · score 0`;
   const again = document.getElementById("againBtn");
   again.textContent = game.round < game.rounds ? "Next Round" : "Play Again";
-  showScreen("result");
+  show("resultModal", true);                        // modal over the board (no page switch)
 }
 
 // ---- board rendering (graphical) ----------------------------------------
